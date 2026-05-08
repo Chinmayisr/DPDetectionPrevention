@@ -1,1 +1,4 @@
-langgarph
+langgraph
+pydantic
+pydantic_settings
+openai
