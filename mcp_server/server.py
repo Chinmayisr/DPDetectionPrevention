@@ -2,26 +2,20 @@
 mcp_server/server.py
 ─────────────────────────────────────────────────────────────────
 MCP Server — fully wired for Phase 2.
-
-All five tools are registered:
-  scrape_page           → Playwright scraper + Redis session store
-  get_agent_payload     → Retrieve any agent's payload from Redis
-  get_session_history   → Return the scrape timeline for a session
-  store_detection       → Persist agent detection results (stub → Phase 4)
-  fetch_similar_patterns→ Qdrant vector search (stub → Phase 4)
 """
 from __future__ import annotations
 
 import json
-from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
+from pydantic import BaseModel
 
 from backend.cache.redis_client import get_redis_client
 from backend.cache.session_store import SessionStore
 from backend.scraper.browser_pool import close_browser_pool, init_browser_pool
+from backend.scraper.playwright_scraper import scrape
 from mcp_server.tools.scrape_tool import handle_scrape_page
 from config import get_settings
 
@@ -46,7 +40,7 @@ mcp = FastMCP("dark-guard-mcp")
 async def startup() -> None:
     logger.info("mcp_server_starting", port=settings.mcp_port)
     await init_browser_pool()
-    await get_redis_client()      # warm connection pool
+    await get_redis_client()
     logger.info("mcp_server_ready")
 
 
@@ -76,6 +70,70 @@ async def health() -> dict:
     }
 
 
+# ── Scrape test endpoint ──────────────────────────────────────
+class ScrapeTestRequest(BaseModel):
+    url: str = "https://example.com"
+    session_id: str = "test-session"
+
+
+@app.post("/scrape-test")
+async def scrape_test(body: ScrapeTestRequest) -> dict:
+    """
+    Direct REST endpoint to test the scraper without MCP protocol.
+    """
+    result = await scrape(url=body.url, session_id=body.session_id)
+
+    redis = await get_redis_client()
+    store = SessionStore(redis)
+    await store.save_scrape(result)
+
+    return {
+        "scrape_id":    result.scrape_id,
+        "session_id":   result.session_id,
+        "page_type":    result.page_type.value,
+        "title":        result.title,
+        "final_url":    result.final_url,
+        "duration_ms":  result.scrape_duration_ms,
+        "screenshot_kb": len(result.screenshot_b64 or "") // 1024,
+        "counts": {
+            "buttons":          len(result.buttons),
+            "forms":            len(result.forms),
+            "prices":           len(result.prices),
+            "overlays":         len(result.overlays),
+            "timers":           len(result.timers),
+            "hidden":           len(result.hidden_elements),
+            "links":            len(result.links),
+            "mutations":        len(result.dom_mutations),
+            "network_reqs":     len(result.network_requests),
+            "auto_popups":      result.auto_popup_count,
+        },
+        "sample_buttons": [
+            {"text": b.text, "in_modal": b.is_in_modal, "is_close": b.is_close_button}
+            for b in result.buttons[:5]
+        ],
+        "sample_prices": [
+            {"text": p.text, "amount": p.amount, "location": p.location}
+            for p in result.prices[:5]
+        ],
+        "sample_overlays": [
+            {
+                "type": o.overlay_type,
+                "autonomous": o.appeared_autonomously,
+                "coverage_pct": o.viewport_coverage_pct,
+                "text": o.text[:100],
+            }
+            for o in result.overlays[:3]
+        ],
+        "redis_keys": {
+            "nlp":        f"dg:nlp:{result.scrape_id}",
+            "visual":     f"dg:visual:{result.scrape_id}",
+            "pricing":    f"dg:pricing:{result.session_id}:{result.scrape_id}",
+            "behavioral": f"dg:behavioral:{result.session_id}:{result.scrape_id}",
+            "screenshot": f"dg:scrape:{result.scrape_id}:screenshot",
+        },
+    }
+
+
 # ═══════════════════════════════════════════════════════════════
 #  MCP TOOL: scrape_page
 # ═══════════════════════════════════════════════════════════════
@@ -87,20 +145,8 @@ async def scrape_page(
     force: bool = False,
 ) -> str:
     """
-    Scrape a web page using Playwright.
-
-    Performs JS-rendered scraping, extracts all dark-pattern-relevant
-    data (buttons, forms, prices, overlays, timers, hidden elements,
-    network requests, DOM mutations), stores everything in Redis
-    keyed by session, and returns Redis keys for each agent's payload.
-
-    Args:
-        url        : Full URL to scrape (must start with http/https)
-        session_id : Browser tab session ID — links scrapes in a journey
-        force      : Set True to bypass cache and force a fresh scrape
-
-    Returns:
-        JSON string with scrape_id, page_type, agent_keys, summary
+    Scrape a web page using Playwright and store results in Redis.
+    Returns JSON with scrape_id, page_type, agent_keys, summary.
     """
     result = await handle_scrape_page({
         "url": url,
@@ -122,20 +168,9 @@ async def get_agent_payload(
 ) -> str:
     """
     Retrieve a pre-built agent payload from Redis.
-
-    After scrape_page completes, each agent's input payload is already
-    stored in Redis. Call this to fetch the data for a specific agent.
-
-    Args:
-        agent      : One of "nlp" | "visual" | "pricing" | "behavioral"
-        scrape_id  : The scrape_id returned by scrape_page
-        session_id : The session_id used when scraping
-
-    Returns:
-        JSON string of the agent-specific payload
+    agent must be one of: nlp | visual | pricing | behavioral | screenshot
     """
     redis = await get_redis_client()
-    store = SessionStore(redis)
 
     key_map = {
         "nlp":        f"dg:nlp:{scrape_id}",
@@ -153,11 +188,10 @@ async def get_agent_payload(
     if not raw:
         return json.dumps({
             "error": "payload_not_found",
-            "message": f"No payload for agent={agent} scrape_id={scrape_id}. "
-                       "It may have expired (TTL=10min) or the scrape failed.",
+            "message": f"No payload for agent={agent} scrape_id={scrape_id}.",
         })
 
-    return raw   # already JSON-serialised from save_scrape
+    return raw
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -166,19 +200,7 @@ async def get_agent_payload(
 
 @mcp.tool()
 async def get_session_history(session_id: str) -> str:
-    """
-    Return the scrape history for a session.
-
-    Returns an ordered list of scrape metadata objects — one per page
-    the user visited in this tab. Used by the Orchestrator to decide
-    routing (e.g., is there a preceding product page for price comparison?).
-
-    Args:
-        session_id : The session ID
-
-    Returns:
-        JSON array of scrape metadata objects (url, page_type, timestamp, etc.)
-    """
+    """Return the ordered scrape history for a session."""
     redis = await get_redis_client()
     store = SessionStore(redis)
 
@@ -206,19 +228,7 @@ async def store_detection(
     detection_result: dict,
     prevention_result: dict,
 ) -> str:
-    """
-    Persist a completed detection + prevention result.
-    Stores in SQLite (permanent record) and Qdrant (vector index).
-
-    NOTE: Full implementation in Phase 4.
-    Currently stores result in Redis as a temporary record.
-
-    Args:
-        scrape_id        : Scrape this detection belongs to
-        session_id       : Session ID
-        detection_result : Dict of NLP/Visual/Pricing/Behavioral results
-        prevention_result: Dict of patch instructions from Prevention Agent
-    """
+    """Persist a completed detection + prevention result to Redis (stub)."""
     redis = await get_redis_client()
     combined = {
         "scrape_id": scrape_id,
@@ -245,18 +255,7 @@ async def fetch_similar_patterns(
     top_k: int = 5,
     pattern_code: str | None = None,
 ) -> str:
-    """
-    Find similar previously-detected dark patterns using vector search.
-    Used by NLP Agent to enrich its prompt with real historical examples.
-
-    NOTE: Full Qdrant implementation in Phase 4.
-    Currently returns an empty matches list.
-
-    Args:
-        text         : Text snippet to search for similar patterns
-        top_k        : Number of results to return
-        pattern_code : Optional filter e.g. "DP01" to restrict to one type
-    """
+    """Vector search for similar dark patterns (Qdrant stub — Phase 4)."""
     logger.info("fetch_similar_stub", text_len=len(text), pattern=pattern_code)
     return json.dumps({
         "matches": [],
@@ -274,5 +273,5 @@ if __name__ == "__main__":
         host=settings.mcp_host,
         port=settings.mcp_port,
         reload=settings.is_development,
-        log_level=settings.debug and "debug" or "info",
+        log_level="debug" if settings.debug else "info",
     )

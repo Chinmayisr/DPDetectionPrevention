@@ -123,7 +123,9 @@ services:
 
     volumes:
       - ./mcp_server:/app/mcp_server
+      - ./backend:/app/backend
       - ./agents:/app/agents
+      - ./config.py:/app/config.py
 
     networks:
       - dark-guard-net
