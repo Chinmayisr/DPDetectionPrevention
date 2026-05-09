@@ -5,10 +5,17 @@ type coercion automatically.
 """
 
 from functools import lru_cache
-from typing import List
+from typing import Annotated, List
 
-from pydantic import Field, field_validator
+from pydantic import BeforeValidator, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def parse_allowed_origins(v: str | list) -> list:
+    """Parse comma-separated origins string into list."""
+    if isinstance(v, str):
+        return [origin.strip() for origin in v.split(",")]
+    return v
 
 
 class Settings(BaseSettings):
@@ -30,14 +37,9 @@ class Settings(BaseSettings):
     # ── Server ────────────────────────────────────────────────────────────────
     backend_host: str = "0.0.0.0"
     backend_port: int = 8000
-    allowed_origins: List[str] = ["http://localhost:3000"]
-
-    @field_validator("allowed_origins", mode="before")
-    @classmethod
-    def parse_origins(cls, v: str | list) -> list:
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        return v
+    allowed_origins: Annotated[List[str], BeforeValidator(parse_allowed_origins)] = [
+        "http://localhost:3000"
+    ]
 
     # ── OpenAI ────────────────────────────────────────────────────────────────
     openai_api_key: str
