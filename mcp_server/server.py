@@ -64,6 +64,7 @@ async def health() -> dict:
         redis_ok = True
     except Exception:
         redis_ok = False
+
     return {
         "status": "healthy" if redis_ok else "degraded",
         "redis": "ok" if redis_ok else "error",
@@ -81,39 +82,51 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
     """
     Direct REST endpoint to test the scraper without MCP protocol.
     """
-    result = await scrape(url=body.url, session_id=body.session_id)
+    result = await scrape(
+        url=body.url,
+        session_id=body.session_id,
+    )
 
     redis = await get_redis_client()
     store = SessionStore(redis)
+
     await store.save_scrape(result)
 
     return {
-        "scrape_id":    result.scrape_id,
-        "session_id":   result.session_id,
-        "page_type":    result.page_type.value,
-        "title":        result.title,
-        "final_url":    result.final_url,
-        "duration_ms":  result.scrape_duration_ms,
+        "scrape_id": result.scrape_id,
+        "session_id": result.session_id,
+        "page_type": result.page_type.value,
+        "title": result.title,
+        "final_url": result.final_url,
+        "duration_ms": result.scrape_duration_ms,
         "screenshot_kb": len(result.screenshot_b64 or "") // 1024,
         "counts": {
-            "buttons":          len(result.buttons),
-            "forms":            len(result.forms),
-            "prices":           len(result.prices),
-            "overlays":         len(result.overlays),
-            "timers":           len(result.timers),
-            "hidden":           len(result.hidden_elements),
-            "links":            len(result.links),
-            "mutations":        len(result.dom_mutations),
-            "network_reqs":     len(result.network_requests),
-            "auto_popups":      result.auto_popup_count,
+            "buttons": len(result.buttons),
+            "forms": len(result.forms),
+            "prices": len(result.prices),
+            "overlays": len(result.overlays),
+            "timers": len(result.timers),
+            "hidden": len(result.hidden_elements),
+            "links": len(result.links),
+            "mutations": len(result.dom_mutations),
+            "network_reqs": len(result.network_requests),
+            "auto_popups": result.auto_popup_count,
             "text_elements": len(result.text_elements),
         },
         "sample_buttons": [
-            {"text": b.text, "in_modal": b.is_in_modal, "is_close": b.is_close_button}
+            {
+                "text": b.text,
+                "in_modal": b.is_in_modal,
+                "is_close": b.is_close_button,
+            }
             for b in result.buttons[:5]
         ],
         "sample_prices": [
-            {"text": p.text, "amount": p.amount, "location": p.location}
+            {
+                "text": p.text,
+                "amount": p.amount,
+                "location": p.location,
+            }
             for p in result.prices[:5]
         ],
         "sample_overlays": [
@@ -126,12 +139,12 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
             for o in result.overlays[:3]
         ],
         "redis_keys": {
-            "nlp":        f"dg:nlp:{result.scrape_id}",
-            "visual":     f"dg:visual:{result.scrape_id}",
-            "pricing":    f"dg:pricing:{result.session_id}:{result.scrape_id}",
+            "nlp": f"dg:nlp:{result.scrape_id}",
+            "visual": f"dg:visual:{result.scrape_id}",
+            "pricing": f"dg:pricing:{result.session_id}:{result.scrape_id}",
             "behavioral": f"dg:behavioral:{result.session_id}:{result.scrape_id}",
             "screenshot": f"dg:scrape:{result.scrape_id}:screenshot",
-            "text":       f"dg:scrape:{result.scrape_id}:text",
+            "text": f"dg:scrape:{result.scrape_id}:text",
         },
     }
 
@@ -155,6 +168,7 @@ async def scrape_page(
         "session_id": session_id,
         "force": force,
     })
+
     return json.dumps(result)
 
 
@@ -170,28 +184,38 @@ async def get_agent_payload(
 ) -> str:
     """
     Retrieve a pre-built agent payload from Redis.
-    agent must be one of: nlp | visual | pricing | behavioral | screenshot
+    agent must be one of:
+    nlp | visual | pricing | behavioral | screenshot
     """
     redis = await get_redis_client()
 
     key_map = {
-        "nlp":        f"dg:nlp:{scrape_id}",
-        "visual":     f"dg:visual:{scrape_id}",
-        "pricing":    f"dg:pricing:{session_id}:{scrape_id}",
+        "nlp": f"dg:nlp:{scrape_id}",
+        "visual": f"dg:visual:{scrape_id}",
+        "pricing": f"dg:pricing:{session_id}:{scrape_id}",
         "behavioral": f"dg:behavioral:{session_id}:{scrape_id}",
         "screenshot": f"dg:scrape:{scrape_id}:screenshot",
-        
     }
 
     key = key_map.get(agent)
+
     if not key:
-        return json.dumps({"error": f"Unknown agent: {agent}. Must be one of {list(key_map)}"})
+        return json.dumps({
+            "error": (
+                f"Unknown agent: {agent}. "
+                f"Must be one of {list(key_map)}"
+            )
+        })
 
     raw = await redis.get(key)
+
     if not raw:
         return json.dumps({
             "error": "payload_not_found",
-            "message": f"No payload for agent={agent} scrape_id={scrape_id}.",
+            "message": (
+                f"No payload for "
+                f"agent={agent} scrape_id={scrape_id}."
+            ),
         })
 
     return raw
@@ -208,16 +232,25 @@ async def get_session_history(session_id: str) -> str:
     store = SessionStore(redis)
 
     scrape_ids = await store.get_session_scrape_ids(session_id)
+
     if not scrape_ids:
-        return json.dumps({"session_id": session_id, "scrapes": []})
+        return json.dumps({
+            "session_id": session_id,
+            "scrapes": [],
+        })
 
     metas = []
+
     for sid in scrape_ids:
         meta = await store.get_scrape_meta(sid)
+
         if meta:
             metas.append(meta)
 
-    return json.dumps({"session_id": session_id, "scrapes": metas})
+    return json.dumps({
+        "session_id": session_id,
+        "scrapes": metas,
+    })
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -231,21 +264,32 @@ async def store_detection(
     detection_result: dict,
     prevention_result: dict,
 ) -> str:
-    """Persist a completed detection + prevention result to Redis (stub)."""
+    """Persist a completed detection + prevention result to Redis."""
     redis = await get_redis_client()
+
     combined = {
         "scrape_id": scrape_id,
         "session_id": session_id,
         "detection": detection_result,
         "prevention": prevention_result,
     }
+
     await redis.setex(
         f"dg:result:{scrape_id}",
         3600,
         json.dumps(combined, default=str),
     )
-    logger.info("detection_stored_redis", scrape_id=scrape_id)
-    return json.dumps({"stored": True, "scrape_id": scrape_id, "backend": "redis_stub"})
+
+    logger.info(
+        "detection_stored_redis",
+        scrape_id=scrape_id,
+    )
+
+    return json.dumps({
+        "stored": True,
+        "scrape_id": scrape_id,
+        "backend": "redis_stub",
+    })
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -258,12 +302,123 @@ async def fetch_similar_patterns(
     top_k: int = 5,
     pattern_code: str | None = None,
 ) -> str:
-    """Vector search for similar dark patterns (Qdrant stub — Phase 4)."""
-    logger.info("fetch_similar_stub", text_len=len(text), pattern=pattern_code)
+    """Vector search for similar dark patterns."""
+    logger.info(
+        "fetch_similar_stub",
+        text_len=len(text),
+        pattern=pattern_code,
+    )
+
     return json.dumps({
         "matches": [],
         "note": "Qdrant integration pending (Phase 4)",
     })
+
+
+# ── Detect test endpoint ──────────────────────────────────────
+class DetectTestRequest(BaseModel):
+    scrape_id: str
+    session_id: str = "test-session"
+
+
+@app.post("/detect-test")
+async def detect_test(body: DetectTestRequest) -> dict:
+    """
+    Run the NLP Agent on an already-scraped page.
+    scrape_id must exist in Redis
+    (run /scrape-test first).
+    """
+    from agents.nlp_agent.runner import run_nlp_agent
+
+    try:
+        result = await run_nlp_agent(
+            scrape_id=body.scrape_id,
+            session_id=body.session_id,
+        )
+
+        return {
+            "scrape_id": result.scrape_id,
+            "url": result.url,
+            "page_type": result.page_type,
+            "total_detected": result.total_detected,
+            "duration_ms": result.detection_duration_ms,
+            "patterns": [
+                {
+                    "code": p.pattern_code.value,
+                    "name": p.pattern_name,
+                    "detected": p.detected,
+                    "confidence": round(p.confidence, 3),
+                    "evidence": [
+                        {
+                            "text": e.text[:200],
+                            "location": e.location,
+                            "reason": e.reason,
+                        }
+                        for e in p.evidence
+                    ],
+                    "error": p.error,
+                }
+                for p in result.patterns
+            ],
+        }
+
+    except KeyError as exc:
+        return {
+            "error": "not_found",
+            "message": str(exc),
+        }
+
+    except Exception as exc:
+        logger.error(
+            "detect_test_error",
+            error=str(exc),
+            exc_info=True,
+        )
+
+        return {
+            "error": "detection_failed",
+            "message": str(exc),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════
+#  MCP TOOL: run_nlp_detection
+# ═══════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def run_nlp_detection(
+    scrape_id: str,
+    session_id: str,
+) -> str:
+    """
+    Run NLP dark pattern detection on a scraped page.
+
+    Detects:
+    - False Urgency
+    - Confirm Shaming
+    - Disguised Ads
+    - Trick Question
+
+    The scrape_id must exist in Redis
+    from a prior scrape_page call.
+
+    Returns JSON with per-pattern
+    detection results and evidence.
+    """
+    from agents.nlp_agent.runner import run_nlp_agent
+
+    try:
+        result = await run_nlp_agent(
+            scrape_id=scrape_id,
+            session_id=session_id,
+        )
+
+        return result.model_dump_json()
+
+    except Exception as exc:
+        return json.dumps({
+            "error": str(exc),
+        })
 
 
 # ── Mount MCP routes and run ──────────────────────────────────
