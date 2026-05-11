@@ -106,6 +106,7 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
             "mutations":        len(result.dom_mutations),
             "network_reqs":     len(result.network_requests),
             "auto_popups":      result.auto_popup_count,
+            "text_elements": len(result.text_elements),
         },
         "sample_buttons": [
             {"text": b.text, "in_modal": b.is_in_modal, "is_close": b.is_close_button}
@@ -130,6 +131,7 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
             "pricing":    f"dg:pricing:{result.session_id}:{result.scrape_id}",
             "behavioral": f"dg:behavioral:{result.session_id}:{result.scrape_id}",
             "screenshot": f"dg:scrape:{result.scrape_id}:screenshot",
+            "text":       f"dg:scrape:{result.scrape_id}:text",
         },
     }
 
@@ -178,6 +180,7 @@ async def get_agent_payload(
         "pricing":    f"dg:pricing:{session_id}:{scrape_id}",
         "behavioral": f"dg:behavioral:{session_id}:{scrape_id}",
         "screenshot": f"dg:scrape:{scrape_id}:screenshot",
+        
     }
 
     key = key_map.get(agent)

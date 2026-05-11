@@ -74,6 +74,9 @@ def _scrape_lock_key(scrape_id: str) -> str:
 def _nlp_key(scrape_id: str) -> str:
     return f"dg:nlp:{scrape_id}"
 
+def _scrape_text_key(scrape_id: str) -> str:
+    return f"dg:scrape:{scrape_id}:text"
+
 def _visual_key(scrape_id: str) -> str:
     return f"dg:visual:{scrape_id}"
 
@@ -112,6 +115,11 @@ class SessionStore:
         session = ScrapeSession(session_id=session_id)
         await self._save_session(session)
         return session
+    
+    async def get_text_elements(self, scrape_id: str) -> list[dict] | None:
+        """Return the full text elements list for a scrape."""
+        raw = await self._r.get(_scrape_text_key(scrape_id))
+        return json.loads(raw) if raw else None    
 
     async def _save_session(self, session: ScrapeSession) -> None:
         session.updated_at = datetime.now(timezone.utc)
@@ -187,6 +195,14 @@ class SessionStore:
         # 2. Full DOM payload (no screenshot)
         pipe.setex(_scrape_dom_key(scrape_id), _DOM_TTL, json.dumps(dom_data, default=str))
 
+        if page.text_elements:
+            text_payload = [t.model_dump() for t in page.text_elements]
+            pipe.setex(
+                _scrape_text_key(scrape_id),
+                _DOM_TTL,
+                json.dumps(text_payload, ensure_ascii=False),
+            )
+
         # 3. Screenshot (short TTL, large value)
         if screenshot_b64:
             pipe.setex(
@@ -194,6 +210,7 @@ class SessionStore:
                 _SCREENSHOT_TTL,
                 screenshot_b64,
             )
+
 
         # 4. Agent payloads
         pipe.setex(

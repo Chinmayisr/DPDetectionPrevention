@@ -123,7 +123,29 @@ class TimerElement(BaseModel):
     text: str                               # displayed text e.g. "00:09:47"
     is_counting_down: bool = False
     css_selector: str | None = None
-    context: str | None = None            # surrounding text for context
+    context: str | None = None  
+    
+# Add this class — place it alongside the other element models
+# (after HiddenElement, before ScrapedPage)
+
+class TextElement(BaseModel):
+    """
+    A single visible text node captured from the page.
+    Preserves tag, location, and surrounding context so agents
+    can detect dark patterns purely from text content.
+    """
+    tag: str                              # h1, p, span, div, button …
+    text: str                             # the actual text content
+    location: str                         # header | footer | modal | banner |
+                                          # cart | checkout | product | body …
+    is_visible: bool = True
+    is_in_fixed: bool = False             # True → inside fixed/sticky element
+    z_index: int = 0
+    bbox: dict | None = None             # {x, y, width, height}
+    parent_tag: str | None = None
+    parent_class: str | None = None
+    prev_text: str | None = None         # sibling context
+    next_text: str | None = None              # surrounding text for context
 
 
 class HiddenElement(BaseModel):
@@ -204,6 +226,7 @@ class ScrapedPage(BaseModel):
     timers: list[TimerElement] = []
     hidden_elements: list[HiddenElement] = []
     schema_org: list[SchemaOrgData] = []
+    text_elements: list[TextElement] = []  
 
     # Behavioral signals
     network_requests: list[NetworkRequest] = []
@@ -255,6 +278,7 @@ class NLPAgentPayload(BaseModel):
     forms: list[FormElement]
     timers: list[TimerElement]
     links: list[LinkElement]
+    text_elements: list[TextElement] = []
 
 
 class VisualAgentPayload(BaseModel):

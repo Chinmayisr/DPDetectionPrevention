@@ -43,6 +43,7 @@ from backend.scraper.extractors import (
     EXTRACT_SUPPLEMENTAL_CHARGES_JS,
     EXTRACT_TIMERS_JS,
     INJECT_MUTATION_OBSERVER_JS,
+    EXTRACT_ALL_TEXT_JS,
 )
 from backend.scraper.models import (
     BehavioralAgentPayload,
@@ -62,6 +63,7 @@ from backend.scraper.models import (
     SupplementalCharge,
     TimerElement,
     VisualAgentPayload,
+    TextElement,
 )
 from backend.scraper.page_classifier import classify_page
 from config import get_settings
@@ -241,6 +243,7 @@ async def _execute_scrape(
         raw_metadata,
         full_html,
         full_text,
+        raw_text_elements,
     ) = await asyncio.gather(
         page.evaluate(EXTRACT_BUTTONS_JS),
         page.evaluate(EXTRACT_FORMS_JS),
@@ -255,6 +258,7 @@ async def _execute_scrape(
         page.evaluate(EXTRACT_METADATA_JS),
         page.content(),
         page.evaluate("document.body.innerText"),
+        page.evaluate(EXTRACT_ALL_TEXT_JS),
         return_exceptions=False,
     )
 
@@ -268,6 +272,7 @@ async def _execute_scrape(
     hidden_els  = _parse_list(raw_hidden, HiddenElement)
     links       = _parse_list(raw_links, LinkElement)
     schema_items= _parse_list(raw_schema, SchemaOrgData)
+    text_elements = _parse_list(raw_text_elements, TextElement)
     metadata    = raw_metadata if isinstance(raw_metadata, dict) else {}
     cart_items  = raw_cart_items if isinstance(raw_cart_items, list) else []
 
@@ -382,6 +387,7 @@ async def _execute_scrape(
         displayed_total=displayed_total,
         computed_subtotal=computed_subtotal,
         price_gap=price_gap,
+        text_elements=text_elements,
         screenshot_b64=screenshot_b64,
         screenshot_key=screenshot_key,
         page_height=metadata.get("page_height", 0),
@@ -562,6 +568,7 @@ def build_nlp_payload(page: ScrapedPage) -> NLPAgentPayload:
         forms=page.forms,
         timers=page.timers,
         links=page.links,
+        text_elements=page.text_elements, 
     )
 
 

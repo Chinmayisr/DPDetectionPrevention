@@ -745,3 +745,148 @@ EXTRACT_METADATA_JS = """
     };
 })()
 """
+
+# ─────────────────────────────────────────────────────────────
+# 13. FULL TEXT CONTENT EXTRACTOR
+# Captures every visible text node with its tag, location,
+# and surrounding context so agents can analyse any text on
+# the page — including "Only 2 left!", urgency banners, etc.
+# ─────────────────────────────────────────────────────────────
+
+EXTRACT_ALL_TEXT_JS = """
+(() => {
+    const results = [];
+    const seen = new WeakSet();
+
+    // Tags whose text is meaningful for dark pattern detection
+    const TARGET_TAGS = new Set([
+        'P','H1','H2','H3','H4','H5','H6',
+        'SPAN','DIV','SECTION','ARTICLE','ASIDE',
+        'LI','TD','TH','LABEL','LEGEND','FIGCAPTION',
+        'STRONG','EM','B','I','SMALL','MARK',
+        'BUTTON','A','HEADER','FOOTER','NAV',
+        'CAPTION','BLOCKQUOTE','PRE',
+    ]);
+
+    // Skip these — they contain no readable user-facing text
+    const SKIP_TAGS = new Set([
+        'SCRIPT','STYLE','NOSCRIPT','TEMPLATE',
+        'SVG','PATH','DEFS','USE','SYMBOL',
+        'META','LINK','HEAD',
+    ]);
+
+    const isVisible = (el) => {
+        try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none') return false;
+            if (style.visibility === 'hidden') return false;
+            if (parseFloat(style.opacity) === 0) return false;
+            const r = el.getBoundingClientRect();
+            // Allow off-screen elements — they may still be dark patterns
+            // (e.g. hidden consent text). Only skip zero-size invisible ones.
+            if (r.width === 0 && r.height === 0) return false;
+            return true;
+        } catch(e) { return false; }
+    };
+
+    const getLocation = (el) => {
+        // Walk up to find a meaningful ancestor label
+        let ancestor = el.parentElement;
+        while (ancestor && ancestor !== document.body) {
+            const tag = ancestor.tagName;
+            const cls = (ancestor.className || '').toLowerCase();
+            const id  = (ancestor.id || '').toLowerCase();
+            if (tag === 'NAV' || cls.includes('nav') || id.includes('nav')) return 'navigation';
+            if (tag === 'HEADER' || cls.includes('header')) return 'header';
+            if (tag === 'FOOTER' || cls.includes('footer')) return 'footer';
+            if (cls.includes('modal') || cls.includes('dialog') || cls.includes('popup')) return 'modal';
+            if (cls.includes('banner') || cls.includes('alert') || cls.includes('notice')) return 'banner';
+            if (cls.includes('cart') || cls.includes('basket')) return 'cart';
+            if (cls.includes('checkout')) return 'checkout';
+            if (cls.includes('product') || cls.includes('item')) return 'product';
+            if (cls.includes('price') || cls.includes('cost') || cls.includes('amount')) return 'price_area';
+            if (cls.includes('form')) return 'form';
+            if (cls.includes('hero') || cls.includes('jumbotron')) return 'hero';
+            ancestor = ancestor.parentElement;
+        }
+        return 'body';
+    };
+
+    const getZIndex = (el) => {
+        try { return parseInt(window.getComputedStyle(el).zIndex || '0') || 0; }
+        catch(e) { return 0; }
+    };
+
+    const isInFixed = (el) => {
+        let cur = el;
+        while (cur && cur !== document.body) {
+            try {
+                const pos = window.getComputedStyle(cur).position;
+                if (pos === 'fixed' || pos === 'sticky') return true;
+            } catch(e) {}
+            cur = cur.parentElement;
+        }
+        return false;
+    };
+
+    // Walk every element in the DOM
+    const allEls = document.querySelectorAll('*');
+    allEls.forEach(el => {
+        if (SKIP_TAGS.has(el.tagName)) return;
+        if (!TARGET_TAGS.has(el.tagName)) return;
+        if (seen.has(el)) return;
+
+        // Only take leaf-ish nodes — elements whose direct text is meaningful.
+        // An element qualifies if it has at least one direct text node child
+        // with non-whitespace content.
+        let directText = '';
+        el.childNodes.forEach(node => {
+            if (node.nodeType === Node.TEXT_NODE) {
+                directText += node.textContent;
+            }
+        });
+        directText = directText.trim();
+
+        // Also take short elements where ALL text is direct (no nested elements
+        // with separate meaning) — catches <span>Only 2 left!</span> patterns
+        const fullText = (el.innerText || el.textContent || '').trim();
+
+        // Choose the best text representation
+        let text = directText || fullText;
+        if (!text || text.length < 2) return;
+        if (text.length > 2000) return; // skip massive blocks, full_text covers those
+
+        seen.add(el);
+
+        // Get bounding box for position context
+        let bbox = null;
+        try {
+            const r = el.getBoundingClientRect();
+            bbox = { x: Math.round(r.x), y: Math.round(r.y),
+                     width: Math.round(r.width), height: Math.round(r.height) };
+        } catch(e) {}
+
+        results.push({
+            tag:         el.tagName.toLowerCase(),
+            text:        text.slice(0, 500),
+            location:    getLocation(el),
+            is_visible:  isVisible(el),
+            is_in_fixed: isInFixed(el),    // fixed/sticky = likely overlay/banner
+            z_index:     getZIndex(el),
+            bbox:        bbox,
+            // Parent context — what contains this text
+            parent_tag:  el.parentElement?.tagName?.toLowerCase() || null,
+            parent_class:(el.parentElement?.className || '').slice(0, 100) || null,
+            // Nearby text for context (previous + next sibling text)
+            prev_text:   el.previousElementSibling
+                            ? (el.previousElementSibling.innerText||'').trim().slice(0,100)
+                            : null,
+            next_text:   el.nextElementSibling
+                            ? (el.nextElementSibling.innerText||'').trim().slice(0,100)
+                            : null,
+        });
+    });
+
+    return results;
+})()
+"""
