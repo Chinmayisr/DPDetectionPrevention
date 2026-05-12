@@ -1,0 +1,1 @@
+"""Behavioral Agent — detects Basket Sneaking, Subscription Trap, Nagging, SaaS Billing, Rogue/Malicious Content."""

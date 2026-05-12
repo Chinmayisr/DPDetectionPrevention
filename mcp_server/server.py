@@ -1,7 +1,25 @@
 """
 mcp_server/server.py
 ─────────────────────────────────────────────────────────────────
-MCP Server — fully wired for Phase 2 + NLP Agent + Pricing Agent.
+MCP Server — fully wired.
+
+REST test endpoints:
+  GET  /                         → root
+  GET  /health                   → health check
+  POST /scrape-test              → scrape a URL + store in Redis
+  POST /detect-test              → run NLP agent on a scrape
+  POST /pricing-detect-test      → run Pricing agent on a scrape
+  POST /behavioral-detect-test   → run Behavioral agent on a scrape
+
+MCP tools (callable by LangGraph agents):
+  scrape_page
+  get_agent_payload
+  get_session_history
+  run_nlp_detection
+  run_pricing_detection
+  run_behavioral_detection
+  store_detection
+  fetch_similar_patterns
 """
 from __future__ import annotations
 
@@ -24,11 +42,15 @@ import structlog
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
+
 # ── FastAPI app ───────────────────────────────────────────────
 app = FastAPI(
     title="Dark Guard MCP Server",
-    version="0.3.0",
-    description="MCP coordination server — browser scraping + agent routing",
+    version="0.4.0",
+    description=(
+        "MCP coordination server — browser scraping + NLP + "
+        "Pricing + Behavioral dark pattern detection"
+    ),
 )
 
 # ── FastMCP instance ──────────────────────────────────────────
@@ -50,10 +72,30 @@ async def shutdown() -> None:
     await close_browser_pool()
 
 
-# ── Health routes ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+#  HEALTH
+# ─────────────────────────────────────────────────────────────
+
 @app.get("/")
 async def root() -> dict:
-    return {"message": "Dark Guard MCP Server", "version": "0.3.0"}
+    return {
+        "message": "Dark Guard MCP Server",
+        "version": "0.4.0",
+        "agents": ["nlp", "pricing", "behavioral"],
+        "patterns": [
+            "DP01 False Urgency",
+            "DP02 Confirm Shaming",
+            "DP03 Disguised Ads",
+            "DP04 Trick Question",
+            "DP05 Drip Pricing",
+            "DP06 Bait and Switch",
+            "DP07 Basket Sneaking",
+            "DP08 Subscription Trap",
+            "DP09 Nagging",
+            "DP10 SaaS Billing",
+            "DP11 Rogue and Malicious Content",
+        ],
+    }
 
 
 @app.get("/health")
@@ -66,13 +108,13 @@ async def health() -> dict:
         redis_ok = False
     return {
         "status": "healthy" if redis_ok else "degraded",
-        "redis": "ok" if redis_ok else "error",
+        "redis":  "ok" if redis_ok else "error",
     }
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  REST: /scrape-test
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 class ScrapeTestRequest(BaseModel):
     url: str = "https://example.com"
@@ -82,9 +124,10 @@ class ScrapeTestRequest(BaseModel):
 @app.post("/scrape-test")
 async def scrape_test(body: ScrapeTestRequest) -> dict:
     """
-    Direct REST endpoint to test the scraper without MCP protocol.
-    Scrapes the given URL, stores all data in Redis, and returns
-    a summary with counts, samples, and Redis key references.
+    Scrape a URL, store all data in Redis, and return a summary.
+
+    Returns scrape_id (needed for detect-test endpoints),
+    counts of all extracted elements, samples, and Redis key references.
     """
     result = await scrape(url=body.url, session_id=body.session_id)
 
@@ -168,9 +211,9 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
     }
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  REST: /detect-test  (NLP Agent)
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 class DetectTestRequest(BaseModel):
     scrape_id: str
@@ -181,9 +224,10 @@ class DetectTestRequest(BaseModel):
 async def detect_test(body: DetectTestRequest) -> dict:
     """
     Run the NLP Agent on an already-scraped page.
-    Detects: False Urgency, Confirm Shaming, Disguised Ads, Trick Question.
+    Detects: False Urgency (DP01), Confirm Shaming (DP02),
+             Disguised Ads (DP03), Trick Question (DP04).
 
-    Step 1: POST /scrape-test with any URL → copy scrape_id
+    Step 1: POST /scrape-test → copy scrape_id from response
     Step 2: POST /detect-test with that scrape_id
     """
     from agents.nlp_agent.runner import run_nlp_agent
@@ -201,10 +245,8 @@ async def detect_test(body: DetectTestRequest) -> dict:
             "duration_ms":    result.detection_duration_ms,
             "patterns": [
                 {
-                    "code":       p.pattern_code
-                        if isinstance(p.pattern_code, str)
-                        else p.pattern_code.value,
-                    "name":       p.pattern_name,
+                    "code": p.code_str(),
+                    "name": p.pattern_name,
                     "detected":   p.detected,
                     "confidence": round(p.confidence, 3),
                     "evidence": [
@@ -227,9 +269,9 @@ async def detect_test(body: DetectTestRequest) -> dict:
         return {"error": "detection_failed", "message": str(exc)}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  REST: /pricing-detect-test  (Pricing Agent)
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 class PricingDetectRequest(BaseModel):
     scrape_id: str
@@ -240,7 +282,7 @@ class PricingDetectRequest(BaseModel):
 async def pricing_detect_test(body: PricingDetectRequest) -> dict:
     """
     Run the Pricing Agent on an already-scraped cart/checkout page.
-    Detects: Drip Pricing, Bait and Switch.
+    Detects: Drip Pricing (DP05), Bait and Switch (DP06).
 
     Best test flow:
       Step 1: POST /scrape-test { url: <product-page>, session_id: "X" }
@@ -262,9 +304,58 @@ async def pricing_detect_test(body: PricingDetectRequest) -> dict:
         return {"error": "detection_failed", "message": str(exc)}
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
+#  REST: /behavioral-detect-test  (Behavioral Agent)
+# ─────────────────────────────────────────────────────────────
+
+class BehavioralDetectRequest(BaseModel):
+    scrape_id: str
+    session_id: str = "test-session"
+
+
+@app.post("/behavioral-detect-test")
+async def behavioral_detect_test(body: BehavioralDetectRequest) -> dict:
+    """
+    Run the Behavioral Agent on an already-scraped page.
+    Detects: Basket Sneaking (DP07), Subscription Trap (DP08),
+             Nagging (DP09), SaaS Billing (DP10),
+             Rogue/Malicious Content (DP11).
+
+    For nagging detection scrape multiple pages under the same
+    session_id first so the popup timeline has history.
+
+    Test flows:
+      Basket sneaking / nagging:
+        Step 1: POST /scrape-test { url: <listing-page>, session_id: "X" }
+        Step 2: POST /scrape-test { url: <checkout>,     session_id: "X" }
+        Step 3: POST /behavioral-detect-test { scrape_id: <checkout-id>, session_id: "X" }
+
+      SaaS billing:
+        Step 1: POST /scrape-test { url: <pricing-page>, session_id: "X" }
+        Step 2: POST /behavioral-detect-test { scrape_id: <id>, session_id: "X" }
+
+      Rogue links:
+        Step 1: POST /scrape-test { url: <download-site>, session_id: "X" }
+        Step 2: POST /behavioral-detect-test { scrape_id: <id>, session_id: "X" }
+    """
+    from agents.behavioral_agent.runner import run_behavioral_agent
+
+    try:
+        result = await run_behavioral_agent(
+            scrape_id=body.scrape_id,
+            session_id=body.session_id,
+        )
+        return result
+    except KeyError as exc:
+        return {"error": "not_found", "message": str(exc)}
+    except Exception as exc:
+        logger.error("behavioral_detect_error", error=str(exc), exc_info=True)
+        return {"error": "detection_failed", "message": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: scrape_page
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def scrape_page(
@@ -275,10 +366,12 @@ async def scrape_page(
     """
     Scrape a web page using Playwright and store results in Redis.
 
-    Performs JS-rendered scraping, extracts all dark-pattern-relevant
-    data (buttons, forms, prices, overlays, timers, hidden elements,
-    text elements, network requests, DOM mutations), stores everything
-    in Redis keyed by session, and returns Redis keys for each agent.
+    Performs JS-rendered scraping and extracts all dark-pattern-relevant
+    data: buttons, forms, prices, overlays, timers, hidden elements,
+    text elements, network requests, DOM mutations.
+
+    Stores everything in Redis keyed by session and returns Redis keys
+    for each agent's pre-built payload.
 
     Args:
         url        : Full URL to scrape (must start with http/https)
@@ -296,9 +389,9 @@ async def scrape_page(
     return json.dumps(result)
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: get_agent_payload
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def get_agent_payload(
@@ -310,15 +403,17 @@ async def get_agent_payload(
     Retrieve a pre-built agent payload from Redis.
 
     After scrape_page completes, each agent's input payload is already
-    stored in Redis. Call this to fetch the data for a specific agent.
+    stored in Redis. Call this to fetch the data for a specific agent
+    without re-running the scraper.
 
     Args:
-        agent      : One of nlp | visual | pricing | behavioral | screenshot | text | dom
+        agent      : One of nlp | visual | pricing | behavioral |
+                     screenshot | text | dom
         scrape_id  : The scrape_id returned by scrape_page
         session_id : The session_id used when scraping
 
     Returns:
-        JSON string of the agent-specific payload
+        JSON string of the agent-specific payload, or error dict
     """
     redis = await get_redis_client()
 
@@ -335,7 +430,8 @@ async def get_agent_payload(
     key = key_map.get(agent)
     if not key:
         return json.dumps({
-            "error": f"Unknown agent: '{agent}'. Must be one of: {list(key_map)}"
+            "error": f"Unknown agent: '{agent}'. "
+                     f"Must be one of: {list(key_map)}"
         })
 
     raw = await redis.get(key)
@@ -343,7 +439,8 @@ async def get_agent_payload(
         return json.dumps({
             "error": "payload_not_found",
             "message": (
-                f"No payload for agent='{agent}' scrape_id='{scrape_id}'. "
+                f"No payload for agent='{agent}' "
+                f"scrape_id='{scrape_id}'. "
                 "It may have expired (TTL=10min) or the scrape failed."
             ),
         })
@@ -351,24 +448,24 @@ async def get_agent_payload(
     return raw
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: get_session_history
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def get_session_history(session_id: str) -> str:
     """
     Return the ordered scrape history for a session.
 
-    Returns a list of scrape metadata objects — one per page visited
-    in this tab. Used by the Orchestrator to decide routing (e.g.,
-    is there a preceding product page for price comparison?).
+    Returns an ordered list of scrape metadata objects, one per page
+    visited in this browser tab. Used by the Orchestrator to decide
+    routing — e.g. is there a preceding product page for price comparison?
 
     Args:
         session_id : The session ID
 
     Returns:
-        JSON with session_id and ordered list of scrape metadata
+        JSON with session_id and ordered list of scrape metadata dicts
     """
     redis = await get_redis_client()
     store = SessionStore(redis)
@@ -386,23 +483,30 @@ async def get_session_history(session_id: str) -> str:
     return json.dumps({"session_id": session_id, "scrapes": metas})
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: run_nlp_detection
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def run_nlp_detection(scrape_id: str, session_id: str) -> str:
     """
     Run NLP dark pattern detection on a scraped page.
-    Detects: False Urgency (DP01), Confirm Shaming (DP02),
-             Disguised Ads (DP03), Trick Question (DP04).
 
+    Detects:
+      DP01 — False Urgency
+      DP02 — Confirm Shaming
+      DP03 — Disguised Ads
+      DP04 — Trick Question
+
+    Runs four detector nodes in parallel via LangGraph fan-out.
     The scrape_id must exist in Redis from a prior scrape_page call.
-    Returns JSON with per-pattern detection results and evidence.
 
     Args:
         scrape_id  : ID from a completed scrape_page call
         session_id : Session ID used during scraping
+
+    Returns:
+        JSON with per-pattern detection results and evidence
     """
     from agents.nlp_agent.runner import run_nlp_agent
 
@@ -417,24 +521,29 @@ async def run_nlp_detection(scrape_id: str, session_id: str) -> str:
         return json.dumps({"error": str(exc)})
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: run_pricing_detection
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def run_pricing_detection(scrape_id: str, session_id: str) -> str:
     """
-    Run Pricing Agent dark pattern detection on a scraped cart/checkout page.
-    Detects: Drip Pricing (DP05), Bait and Switch (DP06).
+    Run Pricing Agent dark pattern detection on a cart/checkout page.
+
+    Detects:
+      DP05 — Drip Pricing  (hidden fees appearing only at checkout)
+      DP06 — Bait and Switch  (price increased between product page and cart)
 
     Requires the scrape_id of a CART, CHECKOUT, or PAYMENT page.
-    For bait-and-switch detection, a prior product page scrape in the
+    For bait-and-switch detection a prior product page scrape in the
     same session is needed to compare prices.
 
     Args:
-        scrape_id  : ID from a completed scrape_page call (cart/checkout page)
-        session_id : Session ID — must match the session used for both
-                     the product page and cart page scrapes
+        scrape_id  : ID from a scrape_page call on a cart/checkout page
+        session_id : Must match the session used for both product and cart scrapes
+
+    Returns:
+        JSON with per-pattern detection results and financial impact summary
     """
     from agents.pricing_agent.runner import run_pricing_agent
 
@@ -449,9 +558,50 @@ async def run_pricing_detection(scrape_id: str, session_id: str) -> str:
         return json.dumps({"error": str(exc)})
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
+#  MCP TOOL: run_behavioral_detection
+# ─────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def run_behavioral_detection(scrape_id: str, session_id: str) -> str:
+    """
+    Run Behavioral Agent dark pattern detection on a scraped page.
+
+    Detects:
+      DP07 — Basket Sneaking  (items auto-added to cart)
+      DP08 — Subscription Trap  (hidden recurring billing)
+      DP09 — Nagging  (repeated popups after dismissal)
+      DP10 — SaaS Billing  (deceptive subscription pricing)
+      DP11 — Rogue and Malicious Content  (misleading links/buttons)
+
+    Runs five detector nodes in parallel via LangGraph fan-out.
+    Returns a behavioral severity score (0–10) in addition to
+    per-pattern detection results.
+
+    Args:
+        scrape_id  : ID from a completed scrape_page call
+        session_id : Session ID — used to build cross-page popup timeline
+                     for nagging detection
+
+    Returns:
+        JSON with per-pattern results and behavioral_severity_score
+    """
+    from agents.behavioral_agent.runner import run_behavioral_agent
+
+    try:
+        result = await run_behavioral_agent(
+            scrape_id=scrape_id,
+            session_id=session_id,
+        )
+        return json.dumps(result, default=str)
+    except Exception as exc:
+        logger.error("mcp_behavioral_error", error=str(exc), exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: store_detection  (stub — Phase 4)
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def store_detection(
@@ -464,13 +614,16 @@ async def store_detection(
     Persist a completed detection + prevention result.
 
     NOTE: Full SQLite + Qdrant implementation in Phase 4.
-    Currently stores result in Redis as a temporary record (TTL 1hr).
+    Currently stores the combined result in Redis (TTL 1 hour).
 
     Args:
         scrape_id        : Scrape this detection belongs to
         session_id       : Session ID
         detection_result : Merged dict of all agent detection results
         prevention_result: Dict of patch instructions from Prevention Agent
+
+    Returns:
+        JSON confirming storage with backend indicator
     """
     redis = await get_redis_client()
     combined = {
@@ -486,15 +639,16 @@ async def store_detection(
     )
     logger.info("detection_stored_redis", scrape_id=scrape_id)
     return json.dumps({
-        "stored":  True,
+        "stored":    True,
         "scrape_id": scrape_id,
-        "backend": "redis_stub",
+        "backend":   "redis_stub",
+        "note":      "Full SQLite + Qdrant persistence in Phase 4",
     })
 
 
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: fetch_similar_patterns  (stub — Phase 4)
-# ═══════════════════════════════════════════════════════════════
+# ─────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def fetch_similar_patterns(
@@ -505,6 +659,9 @@ async def fetch_similar_patterns(
     """
     Find similar previously-detected dark patterns using vector search.
 
+    Used by NLP Agent to enrich prompts with real historical examples
+    from the Qdrant vector store (RAG pattern).
+
     NOTE: Full Qdrant implementation in Phase 4.
     Currently returns an empty matches list.
 
@@ -512,15 +669,19 @@ async def fetch_similar_patterns(
         text         : Text snippet to find similar patterns for
         top_k        : Number of results to return (default 5)
         pattern_code : Optional filter e.g. "DP01" to restrict to one type
+
+    Returns:
+        JSON with matches array (empty until Phase 4)
     """
     logger.info(
         "fetch_similar_stub",
         text_len=len(text),
         pattern=pattern_code,
+        top_k=top_k,
     )
     return json.dumps({
         "matches": [],
-        "note": "Qdrant integration pending (Phase 4)",
+        "note":    "Qdrant vector search integration pending (Phase 4)",
     })
 
 
