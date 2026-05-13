@@ -98,9 +98,10 @@ def _build_user_message(state: BehavioralAgentState) -> str:
 
     parts += ["", "=== BUTTONS (href and data attributes) ==="]
     for b in buttons[:30]:
+        href = b.get("actual_href") or b.get("href") or ""
         parts.append(
-            f"  text='{b.get('text','')[:80]}' | "
-            f"href='{b.get('actual_href') or b.get('href','')[:80]}' | "
+            f"  text='{(b.get('text') or '')[:80]}' | "
+            f"href='{href[:80]}' | "
             f"mismatch={b.get('domain_mismatch')} | "
             f"close={b.get('is_close_button')}"
         )
