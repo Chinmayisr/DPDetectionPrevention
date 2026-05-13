@@ -30,7 +30,9 @@ class DarkPatternCode(str, Enum):
     NAGGING           = "DP09"
     SAAS_BILLING      = "DP10"
     ROGUE_MALICIOUS   = "DP11"
-
+    FORCED_ACTION       = "DP13"
+    #visual agent
+    INTERFACE_INTERFERENCE = "DP12"
 
 PATTERN_NAMES: dict[DarkPatternCode, str] = {
     DarkPatternCode.FALSE_URGENCY:    "False Urgency",
@@ -44,6 +46,8 @@ PATTERN_NAMES: dict[DarkPatternCode, str] = {
     DarkPatternCode.NAGGING:          "Nagging",
     DarkPatternCode.SAAS_BILLING:     "SaaS Billing",
     DarkPatternCode.ROGUE_MALICIOUS:  "Rogue and Malicious Content",
+    DarkPatternCode.INTERFACE_INTERFERENCE: "Interface Interference",
+    DarkPatternCode.FORCED_ACTION: "Forced Action",
 }
 
 PATTERN_AGENT_MAP: dict[DarkPatternCode, str] = {

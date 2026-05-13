@@ -138,12 +138,14 @@ async def run_behavioral_agent(
         "nagging_signals":           {},
         "saas_billing_signals":      {},
         "rogue_malicious_signals":   {},
+        "forced_action_signals":     {},    
 
         "basket_sneaking_result":   None,
         "subscription_trap_result": None,
         "nagging_result":           None,
         "saas_billing_result":      None,
         "rogue_malicious_result":   None,
+        "forced_action_result":     None,
 
         "aggregated_result": None,
         "errors": [],

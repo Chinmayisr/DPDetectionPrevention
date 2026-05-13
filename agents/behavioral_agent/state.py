@@ -59,6 +59,7 @@ class BehavioralAgentState(TypedDict):
     nagging_signals:            dict
     saas_billing_signals:       dict
     rogue_malicious_signals:    dict
+    forced_action_signals:      dict 
 
     # ── Detection results ──────────────────────────────────────
     basket_sneaking_result:   Annotated[SinglePatternResult | None, _merge_result]

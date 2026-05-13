@@ -62,11 +62,48 @@ _CART_ENDPOINTS = re.compile(
     re.IGNORECASE,
 )
 
+# ── Forced Action keyword patterns ────────────────────────────
+
+_FORCED_GATE_KW = re.compile(
+    r"you\s+must|must\s+sign\s+up|must\s+log\s+in|must\s+register|"
+    r"required\s+to\s+sign|required\s+to\s+log|"
+    r"sign\s+up\s+to\s+(continue|access|view|read|download|proceed)|"
+    r"log\s+in\s+to\s+(continue|access|view|read|download|proceed)|"
+    r"create\s+an?\s+account\s+to|register\s+to\s+(continue|access)|"
+    r"login\s+required|sign.in\s+required|account\s+required|"
+    r"members?\s+only|subscribers?\s+only|"
+    r"install\s+(the\s+)?app\s+to|download\s+(the\s+)?app\s+to|"
+    r"allow\s+notifications\s+to\s+(continue|access|proceed)|"
+    r"accept\s+(all\s+)?cookies\s+to|"
+    r"must\s+accept|agree\s+to\s+continue|"
+    r"to\s+continue\s+(you\s+must|please\s+sign|please\s+log)|"
+    r"guest\s+checkout\s+(not\s+)?available|"
+    r"no\s+guest\s+checkout",
+    re.IGNORECASE,
+)
+
+_FORCED_FORM_KW = re.compile(
+    r"required|mandatory|must\s+complete|"
+    r"phone\s+number\s+required|email\s+required|"
+    r"verify\s+your\s+(phone|email|identity)",
+    re.IGNORECASE,
+)
+
+_BLOCKING_OVERLAY_KW = re.compile(
+    r"sign\s+up|log\s+in|login|register|create\s+account|"
+    r"subscribe|join\s+now|get\s+started|"
+    r"install\s+app|download\s+app|"
+    r"allow\s+notifications|enable\s+notifications|"
+    r"verify\s+age|age\s+gate|"
+    r"enter\s+your\s+email|your\s+email\s+address",
+    re.IGNORECASE,
+)
+
 _FINE_PRINT_LOCATIONS = {"footer", "body"}
 _FINE_PRINT_TAGS = {"small", "span", "p"}
 
-_SIMILARITY_THRESHOLD = 0.75   # 75% text similarity = "same" popup
-_NAGGING_COUNT_THRESHOLD = 2   # 2+ identical popups = nagging
+_SIMILARITY_THRESHOLD = 0.75
+_NAGGING_COUNT_THRESHOLD = 2
 
 
 def _text_similarity(a: str, b: str) -> float:
@@ -75,7 +112,7 @@ def _text_similarity(a: str, b: str) -> float:
 
 def preprocess_node(state: BehavioralAgentState) -> dict:
     """
-    Build all five signal dicts from raw scraped data.
+    Build all six signal dicts from raw scraped data.
     No LLM calls — pure deterministic analysis.
     """
 
@@ -108,18 +145,15 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         if name and name not in prev_item_names:
             new_items.append(item)
 
-    # Cart auto-mutations from network layer
     auto_cart_mutation_count = len(auto_cart_mutations)
     cart_mutation_urls = [r.get("url", "") for r in auto_cart_mutations]
 
-    # DOM mutations that touched cart-like elements
     cart_dom_mutations: list[dict] = []
     for m in mutations:
         sel = m.get("target_selector", "")
         if sel and _CART_ENDPOINTS.search(sel):
             cart_dom_mutations.append(m)
 
-    # Text signals near add-on descriptions
     sneaking_text_signals: list[str] = []
     for t in text_elements:
         text = t.get("text", "")
@@ -157,18 +191,15 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         if _SUBSCRIPTION_KW.search(text) and len(text) < 300:
             entry = f"[{tag}|{loc}] {text[:150]}"
             subscription_kw_found.append(entry)
-            # Fine print = small tag or footer location
             if tag in _FINE_PRINT_TAGS or loc in _FINE_PRINT_LOCATIONS:
                 fine_print_subscription.append(entry)
 
-    # Check CTA buttons for ambiguous text
     ambiguous_cta: list[str] = []
     for b in buttons:
         btn_text = (b.get("text") or "").strip()
         if _SUBSCRIPTION_CTA.search(btn_text) and len(btn_text) < 100:
             ambiguous_cta.append(btn_text[:80])
 
-    # Pre-checked consent checkboxes
     pre_checked_count = 0
     for form in forms:
         pre_checked_count += form.get("pre_checked_count", 0)
@@ -176,7 +207,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
             if field.get("input_type") == "checkbox" and field.get("is_pre_checked"):
                 pre_checked_count += 1
 
-    # Is the total zero or near-zero (free trial)?
     zero_price_cta = False
     for p in prices:
         amount = p.get("amount") or 0
@@ -184,7 +214,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
             zero_price_cta = True
             break
 
-    # Network calls to subscription endpoints
     subscription_api_calls: list[str] = []
     for req in network_requests:
         url = req.get("url", "")
@@ -208,8 +237,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # ─────────────────────────────────────────────────────────
     # 3. NAGGING SIGNALS
     # ─────────────────────────────────────────────────────────
-
-    # Group popup_timeline by text similarity
     popup_groups: list[list[dict]] = []
     for entry in popup_timeline:
         text = entry.get("text", "")[:200]
@@ -222,7 +249,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         if not placed:
             popup_groups.append([entry])
 
-    # Find groups that appeared more than threshold times
     repeated_groups: list[dict] = []
     for group in popup_groups:
         if len(group) >= _NAGGING_COUNT_THRESHOLD:
@@ -232,7 +258,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
                 "pages":  [e.get("url", "") for e in group],
             })
 
-    # Notification request detection
     notification_requests: list[str] = []
     for t in text_elements:
         if _NOTIFICATION_KW.search(t.get("text", "")):
@@ -245,7 +270,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
                 f"[overlay] {o.get('text','')[:100]}"
             )
 
-    # Total autonomous popups across session
     total_autonomous = sum(
         1 for e in popup_timeline
         if e.get("autonomous", False)
@@ -266,7 +290,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # ─────────────────────────────────────────────────────────
     # 4. SAAS BILLING SIGNALS
     # ─────────────────────────────────────────────────────────
-
     saas_kw_found: list[str] = []
     annual_billed_as_monthly: list[str] = []
     per_seat_signals: list[str] = []
@@ -294,7 +317,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         if re.search(r"introductory|then\s+\$|after\s+\d+|price\s+increase", text, re.IGNORECASE):
             intro_price_signals.append(entry)
 
-    # Price anchoring: look for crossed-out prices (original_price present)
     price_anchoring: list[dict] = []
     for p in prices:
         if p.get("original_price") and p.get("amount"):
@@ -324,8 +346,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # ─────────────────────────────────────────────────────────
     # 5. ROGUE / MALICIOUS SIGNALS
     # ─────────────────────────────────────────────────────────
-
-    # Classify redirect traps by severity
     high_traps:   list[dict] = []
     medium_traps: list[dict] = []
 
@@ -358,7 +378,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         elif severity == "medium":
             medium_traps.append(entry)
 
-    # Suspicious download buttons
     download_buttons: list[str] = []
     for b in buttons:
         btn_text = (b.get("text") or "").lower()
@@ -369,7 +388,6 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
                     f"text='{b.get('text','')[:60]}' href='{href[:80]}'"
                 )
 
-    # JS-injected links (added via DOM mutation after page load)
     injected_links: list[str] = []
     for m in mutations:
         if m.get("added_nodes_count", 0) > 0:
@@ -391,10 +409,158 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         "has_high_severity":      len(high_traps) > 0,
     }
 
+    # ─────────────────────────────────────────────────────────
+    # 6. FORCED ACTION SIGNALS  ← NEW
+    # ─────────────────────────────────────────────────────────
+
+    # Gate language in text elements
+    gate_text_signals: list[str] = []
+    for t in text_elements:
+        text = t.get("text", "")
+        if _FORCED_GATE_KW.search(text) and len(text) < 300:
+            gate_text_signals.append(
+                f"[{t.get('tag','?')}|{t.get('location','?')}] {text[:200]}"
+            )
+
+    # Blocking overlays — overlays that gate access
+    blocking_overlays: list[dict] = []
+    for o in current_overlays:
+        overlay_text = o.get("text", "")
+        is_blocking = (
+            o.get("blocks_interaction", False) or
+            o.get("viewport_coverage_pct", 0) > 40 or
+            _BLOCKING_OVERLAY_KW.search(overlay_text)
+        )
+        if is_blocking:
+            blocking_overlays.append({
+                "type":        o.get("overlay_type", ""),
+                "coverage":    o.get("viewport_coverage_pct", 0),
+                "text":        overlay_text[:150],
+                "has_close":   o.get("has_close_button", False),
+                "blocks":      o.get("blocks_interaction", False),
+                "autonomous":  o.get("appeared_autonomously", False),
+            })
+
+    # Required form fields that shouldn't be required
+    excessive_required_fields: list[dict] = []
+    for form in forms:
+        required_fields = [
+            f for f in form.get("fields", [])
+            if f.get("is_required") and not f.get("is_hidden")
+        ]
+        # Flag forms with phone number required (often unnecessary)
+        phone_required = any(
+            re.search(r"phone|mobile|tel|cell", f.get("name", "") + f.get("label_text", ""), re.IGNORECASE)
+            for f in required_fields
+        )
+        # Flag forms where marketing consent is required
+        consent_required = any(
+            re.search(r"newsletter|marketing|promotions|offers", f.get("label_text", ""), re.IGNORECASE)
+            and f.get("is_required")
+            for f in form.get("fields", [])
+        )
+        if phone_required or consent_required:
+            excessive_required_fields.append({
+                "form_action":      form.get("action", ""),
+                "phone_required":   phone_required,
+                "consent_required": consent_required,
+                "field_count":      len(required_fields),
+            })
+
+    # Notification permission as gate
+    notification_gate: list[str] = []
+    for t in text_elements:
+        text = t.get("text", "")
+        if (
+            _NOTIFICATION_KW.search(text) and
+            re.search(r"to\s+(continue|access|proceed|use|view)", text, re.IGNORECASE)
+        ):
+            notification_gate.append(
+                f"[{t.get('location','?')}] {text[:150]}"
+            )
+
+    # Guest checkout blocked detection
+    guest_checkout_blocked: list[str] = []
+    for t in text_elements:
+        text = t.get("text", "")
+        if re.search(
+            r"guest\s+checkout\s+(not\s+)?(available|allowed|supported|possible)|"
+            r"must\s+(create|have)\s+an?\s+account|"
+            r"sign\s+in\s+to\s+checkout|login\s+to\s+checkout|"
+            r"account\s+required\s+to\s+(purchase|buy|checkout)",
+            text, re.IGNORECASE
+        ):
+            guest_checkout_blocked.append(
+                f"[{t.get('location','?')}] {text[:150]}"
+            )
+
+    # Network requests blocked by forced action
+    # (navigation requests that only fire after form submit)
+    blocked_navigation: list[str] = []
+    for req in network_requests:
+        url = req.get("url", "")
+        method = req.get("method", "")
+        if (
+            method == "POST" and
+            re.search(r"register|signup|sign.up|login|log.in|auth|subscribe", url, re.IGNORECASE) and
+            req.get("is_auto_triggered", False)
+        ):
+            blocked_navigation.append(url[:150])
+
+    # Forced social login detection
+    forced_social_login: list[str] = []
+    for b in buttons:
+        btn_text = (b.get("text") or "").strip()
+        if re.search(
+            r"continue\s+with\s+(google|facebook|apple|twitter|github)|"
+            r"sign\s+in\s+with\s+(google|facebook|apple)|"
+            r"log\s+in\s+with\s+(google|facebook|apple)",
+            btn_text, re.IGNORECASE
+        ):
+            forced_social_login.append(btn_text[:80])
+
+    forced_action_signals = {
+        # Gate language
+        "gate_text_signals":          gate_text_signals[:15],
+        "gate_text_count":            len(gate_text_signals),
+
+        # Blocking overlays
+        "blocking_overlays":          blocking_overlays[:5],
+        "blocking_overlay_count":     len(blocking_overlays),
+        "has_blocking_overlay":       len(blocking_overlays) > 0,
+
+        # Form analysis
+        "excessive_required_fields":  excessive_required_fields[:5],
+        "has_excessive_requirements": len(excessive_required_fields) > 0,
+
+        # Specific forced action types
+        "notification_gates":         notification_gate[:5],
+        "has_notification_gate":      len(notification_gate) > 0,
+        "guest_checkout_blocked":     guest_checkout_blocked[:5],
+        "has_guest_checkout_blocked": len(guest_checkout_blocked) > 0,
+        "forced_social_logins":       forced_social_login[:5],
+        "has_forced_social_login":    len(forced_social_login) > 0,
+        "blocked_navigation_requests":blocked_navigation[:5],
+
+        # Overall assessment
+        "total_forced_action_signals": (
+            len(gate_text_signals) +
+            len(blocking_overlays) +
+            len(notification_gate) +
+            len(guest_checkout_blocked)
+        ),
+        "is_likely_forced_action": (
+            len(gate_text_signals) > 0 or
+            len(blocking_overlays) > 0 or
+            len(guest_checkout_blocked) > 0
+        ),
+    }
+
     return {
         "basket_sneaking_signals":   basket_sneaking_signals,
         "subscription_trap_signals": subscription_trap_signals,
         "nagging_signals":           nagging_signals,
         "saas_billing_signals":      saas_billing_signals,
         "rogue_malicious_signals":   rogue_malicious_signals,
+        "forced_action_signals":     forced_action_signals,   # ← NEW
     }

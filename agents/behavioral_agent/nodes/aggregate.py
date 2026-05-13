@@ -1,6 +1,6 @@
 """
 agents/behavioral_agent/nodes/aggregate.py
-Merges all five results, computes severity score, stores to Redis.
+Merges all six results, computes severity score, stores to Redis.
 """
 from __future__ import annotations
 
@@ -18,13 +18,13 @@ logger = structlog.get_logger(__name__)
 
 _DETECTION_TTL = 1800
 
-# Severity weights per pattern (higher = more urgent)
 _SEVERITY_WEIGHTS = {
-    "DP07": 8,   # Basket Sneaking — direct financial impact
-    "DP08": 7,   # Subscription Trap — recurring financial impact
-    "DP11": 9,   # Rogue/Malicious — security risk
-    "DP09": 4,   # Nagging — annoying but lower risk
-    "DP10": 6,   # SaaS Billing — financial deception
+    "DP07": 8,    # Basket Sneaking
+    "DP08": 7,    # Subscription Trap
+    "DP11": 9,    # Rogue/Malicious
+    "DP09": 4,    # Nagging
+    "DP10": 6,    # SaaS Billing
+    "DP13": 8,    # Forced Action  ← NEW
 }
 
 
@@ -39,6 +39,7 @@ async def aggregate_node(state: BehavioralAgentState) -> dict:
         "nagging_result",
         "saas_billing_result",
         "rogue_malicious_result",
+        "forced_action_result",      # ← NEW
     ):
         val = state.get(key)
         if val is not None:
@@ -47,7 +48,6 @@ async def aggregate_node(state: BehavioralAgentState) -> dict:
     total_detected = sum(1 for r in results if r.detected)
     duration_ms    = int((time.perf_counter() - start) * 1000)
 
-    # Compute behavioral severity score (0–10)
     severity_score = 0.0
     detected_results = [r for r in results if r.detected]
     if detected_results:

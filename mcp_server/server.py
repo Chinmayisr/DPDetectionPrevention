@@ -1,23 +1,25 @@
 """
 mcp_server/server.py
 ─────────────────────────────────────────────────────────────────
-MCP Server — fully wired.
+MCP Server — fully wired for all agents and all 13 dark patterns.
 
 REST test endpoints:
-  GET  /                         → root
-  GET  /health                   → health check
-  POST /scrape-test              → scrape a URL + store in Redis
-  POST /detect-test              → run NLP agent on a scrape
-  POST /pricing-detect-test      → run Pricing agent on a scrape
-  POST /behavioral-detect-test   → run Behavioral agent on a scrape
+  GET  /                              → root + pattern catalogue
+  GET  /health                        → health check
+  POST /scrape-test                   → scrape URL + store in Redis
+  POST /detect-test                   → NLP Agent (DP01–DP04)
+  POST /pricing-detect-test           → Pricing Agent (DP05–DP06)
+  POST /behavioral-detect-test        → Behavioral Agent (DP07–DP11, DP13)
+  POST /visual-detect-test            → Visual Agent (DP03, DP12)
 
-MCP tools (callable by LangGraph agents):
+MCP tools:
   scrape_page
   get_agent_payload
   get_session_history
   run_nlp_detection
   run_pricing_detection
   run_behavioral_detection
+  run_visual_detection
   store_detection
   fetch_similar_patterns
 """
@@ -46,10 +48,11 @@ settings = get_settings()
 # ── FastAPI app ───────────────────────────────────────────────
 app = FastAPI(
     title="Dark Guard MCP Server",
-    version="0.4.0",
+    version="0.5.0",
     description=(
-        "MCP coordination server — browser scraping + NLP + "
-        "Pricing + Behavioral dark pattern detection"
+        "MCP coordination server — browser scraping + "
+        "NLP + Pricing + Behavioral + Visual dark pattern detection. "
+        "Detects all 13 dark pattern types (DP01–DP13)."
     ),
 )
 
@@ -80,20 +83,27 @@ async def shutdown() -> None:
 async def root() -> dict:
     return {
         "message": "Dark Guard MCP Server",
-        "version": "0.4.0",
-        "agents": ["nlp", "pricing", "behavioral"],
+        "version": "0.5.0",
+        "agents": [
+            "nlp       → DP01 DP02 DP03 DP04",
+            "pricing   → DP05 DP06",
+            "behavioral→ DP07 DP08 DP09 DP10 DP11 DP13",
+            "visual    → DP03 DP12",
+        ],
         "patterns": [
-            "DP01 False Urgency",
-            "DP02 Confirm Shaming",
-            "DP03 Disguised Ads",
-            "DP04 Trick Question",
-            "DP05 Drip Pricing",
-            "DP06 Bait and Switch",
-            "DP07 Basket Sneaking",
-            "DP08 Subscription Trap",
-            "DP09 Nagging",
-            "DP10 SaaS Billing",
-            "DP11 Rogue and Malicious Content",
+            "DP01  False Urgency",
+            "DP02  Confirm Shaming",
+            "DP03  Disguised Ads",
+            "DP04  Trick Question",
+            "DP05  Drip Pricing",
+            "DP06  Bait and Switch",
+            "DP07  Basket Sneaking",
+            "DP08  Subscription Trap",
+            "DP09  Nagging",
+            "DP10  SaaS Billing",
+            "DP11  Rogue and Malicious Content",
+            "DP12  Interface Interference",
+            "DP13  Forced Action",
         ],
     }
 
@@ -124,10 +134,14 @@ class ScrapeTestRequest(BaseModel):
 @app.post("/scrape-test")
 async def scrape_test(body: ScrapeTestRequest) -> dict:
     """
-    Scrape a URL, store all data in Redis, and return a summary.
+    Scrape a URL, store all data in Redis, return a summary.
 
-    Returns scrape_id (needed for detect-test endpoints),
-    counts of all extracted elements, samples, and Redis key references.
+    Returns scrape_id needed for all detect-test endpoints,
+    counts of every extracted element type, samples, and
+    all Redis key references.
+
+    NOTE: Screenshots expire after 10 minutes.
+    Run /visual-detect-test within that window.
     """
     result = await scrape(url=body.url, session_id=body.session_id)
 
@@ -212,7 +226,7 @@ async def scrape_test(body: ScrapeTestRequest) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-#  REST: /detect-test  (NLP Agent)
+#  REST: /detect-test  (NLP Agent — DP01–DP04)
 # ─────────────────────────────────────────────────────────────
 
 class DetectTestRequest(BaseModel):
@@ -224,11 +238,17 @@ class DetectTestRequest(BaseModel):
 async def detect_test(body: DetectTestRequest) -> dict:
     """
     Run the NLP Agent on an already-scraped page.
-    Detects: False Urgency (DP01), Confirm Shaming (DP02),
-             Disguised Ads (DP03), Trick Question (DP04).
 
-    Step 1: POST /scrape-test → copy scrape_id from response
-    Step 2: POST /detect-test with that scrape_id
+    Detects:
+      DP01 — False Urgency
+      DP02 — Confirm Shaming
+      DP03 — Disguised Ads  (text-based)
+      DP04 — Trick Question
+
+    Runs four detector nodes in parallel via LangGraph fan-out.
+
+    Step 1: POST /scrape-test { url: <url>, session_id: "X" } → copy scrape_id
+    Step 2: POST /detect-test { scrape_id: <id>, session_id: "X" }
     """
     from agents.nlp_agent.runner import run_nlp_agent
 
@@ -245,8 +265,8 @@ async def detect_test(body: DetectTestRequest) -> dict:
             "duration_ms":    result.detection_duration_ms,
             "patterns": [
                 {
-                    "code": p.code_str(),
-                    "name": p.pattern_name,
+                    "code":       p.code_str(),
+                    "name":       p.pattern_name,
                     "detected":   p.detected,
                     "confidence": round(p.confidence, 3),
                     "evidence": [
@@ -270,7 +290,7 @@ async def detect_test(body: DetectTestRequest) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-#  REST: /pricing-detect-test  (Pricing Agent)
+#  REST: /pricing-detect-test  (Pricing Agent — DP05–DP06)
 # ─────────────────────────────────────────────────────────────
 
 class PricingDetectRequest(BaseModel):
@@ -282,12 +302,17 @@ class PricingDetectRequest(BaseModel):
 async def pricing_detect_test(body: PricingDetectRequest) -> dict:
     """
     Run the Pricing Agent on an already-scraped cart/checkout page.
-    Detects: Drip Pricing (DP05), Bait and Switch (DP06).
+
+    Detects:
+      DP05 — Drip Pricing  (hidden fees at checkout)
+      DP06 — Bait and Switch  (price change between product page and cart)
 
     Best test flow:
       Step 1: POST /scrape-test { url: <product-page>, session_id: "X" }
       Step 2: POST /scrape-test { url: <cart-page>,    session_id: "X" }
-      Step 3: POST /pricing-detect-test { scrape_id: <cart-scrape-id>, session_id: "X" }
+      Step 3: POST /pricing-detect-test { scrape_id: <cart-id>, session_id: "X" }
+
+    Good test sites: Swiggy, Zomato, MakeMyTrip checkout pages.
     """
     from agents.pricing_agent.runner import run_pricing_agent
 
@@ -305,7 +330,7 @@ async def pricing_detect_test(body: PricingDetectRequest) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
-#  REST: /behavioral-detect-test  (Behavioral Agent)
+#  REST: /behavioral-detect-test  (Behavioral Agent — DP07–DP11, DP13)
 # ─────────────────────────────────────────────────────────────
 
 class BehavioralDetectRequest(BaseModel):
@@ -317,26 +342,33 @@ class BehavioralDetectRequest(BaseModel):
 async def behavioral_detect_test(body: BehavioralDetectRequest) -> dict:
     """
     Run the Behavioral Agent on an already-scraped page.
-    Detects: Basket Sneaking (DP07), Subscription Trap (DP08),
-             Nagging (DP09), SaaS Billing (DP10),
-             Rogue/Malicious Content (DP11).
 
-    For nagging detection scrape multiple pages under the same
+    Detects:
+      DP07 — Basket Sneaking
+      DP08 — Subscription Trap
+      DP09 — Nagging
+      DP10 — SaaS Billing
+      DP11 — Rogue and Malicious Content
+      DP13 — Forced Action
+
+    Runs six detector nodes in parallel via LangGraph fan-out.
+    Returns behavioral_severity_score (0–10).
+
+    For nagging detection: scrape multiple pages under the same
     session_id first so the popup timeline has history.
 
     Test flows:
-      Basket sneaking / nagging:
-        Step 1: POST /scrape-test { url: <listing-page>, session_id: "X" }
-        Step 2: POST /scrape-test { url: <checkout>,     session_id: "X" }
+      Basket sneaking / forced action:
+        Step 1: POST /scrape-test { url: <listing>,  session_id: "X" }
+        Step 2: POST /scrape-test { url: <checkout>, session_id: "X" }
         Step 3: POST /behavioral-detect-test { scrape_id: <checkout-id>, session_id: "X" }
 
       SaaS billing:
         Step 1: POST /scrape-test { url: <pricing-page>, session_id: "X" }
         Step 2: POST /behavioral-detect-test { scrape_id: <id>, session_id: "X" }
 
-      Rogue links:
-        Step 1: POST /scrape-test { url: <download-site>, session_id: "X" }
-        Step 2: POST /behavioral-detect-test { scrape_id: <id>, session_id: "X" }
+      Nagging:
+        Scrape 3+ pages on same session_id, then run on last scrape_id.
     """
     from agents.behavioral_agent.runner import run_behavioral_agent
 
@@ -354,6 +386,57 @@ async def behavioral_detect_test(body: BehavioralDetectRequest) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+#  REST: /visual-detect-test  (Visual Agent — DP03, DP12)
+# ─────────────────────────────────────────────────────────────
+
+class VisualDetectRequest(BaseModel):
+    scrape_id: str
+    session_id: str = "test-session"
+
+
+@app.post("/visual-detect-test")
+async def visual_detect_test(body: VisualDetectRequest) -> dict:
+    """
+    Run the Visual Agent on an already-scraped page using GPT-4o vision.
+
+    Detects:
+      DP03 — Disguised Ads  (visual: ad labels hidden, editorial mimicry)
+      DP12 — Interface Interference  (button asymmetry, hidden close buttons,
+              consent dialog visual manipulation)
+
+    IMPORTANT: Screenshots expire after 10 minutes.
+    Run this within 10 minutes of /scrape-test.
+
+    Step 1: POST /scrape-test { url: <url>, session_id: "X" } → copy scrape_id
+    Step 2: POST /visual-detect-test { scrape_id: <id>, session_id: "X" }
+            (within 10 minutes of step 1)
+
+    Best test URLs:
+      Interface Interference: bbc.com, nytimes.com (cookie consent modals)
+      Disguised Ads:          news.google.com, any marketplace search page
+    """
+    from agents.visual_agent.runner import run_visual_agent
+
+    try:
+        result = await run_visual_agent(
+            scrape_id=body.scrape_id,
+            session_id=body.session_id,
+        )
+        return result
+    except KeyError as exc:
+        return {"error": "not_found", "message": str(exc)}
+    except ValueError as exc:
+        return {
+            "error":   "screenshot_expired",
+            "message": str(exc),
+            "hint":    "Re-run /scrape-test then call /visual-detect-test within 10 minutes.",
+        }
+    except Exception as exc:
+        logger.error("visual_detect_error", error=str(exc), exc_info=True)
+        return {"error": "detection_failed", "message": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────────
 #  MCP TOOL: scrape_page
 # ─────────────────────────────────────────────────────────────
 
@@ -364,11 +447,11 @@ async def scrape_page(
     force: bool = False,
 ) -> str:
     """
-    Scrape a web page using Playwright and store results in Redis.
+    Scrape a web page using Playwright and store all results in Redis.
 
     Performs JS-rendered scraping and extracts all dark-pattern-relevant
     data: buttons, forms, prices, overlays, timers, hidden elements,
-    text elements, network requests, DOM mutations.
+    text elements, network requests, DOM mutations, screenshot.
 
     Stores everything in Redis keyed by session and returns Redis keys
     for each agent's pre-built payload.
@@ -382,9 +465,9 @@ async def scrape_page(
         JSON string with scrape_id, page_type, agent_keys, summary
     """
     result = await handle_scrape_page({
-        "url": url,
+        "url":        url,
         "session_id": session_id,
-        "force": force,
+        "force":      force,
     })
     return json.dumps(result)
 
@@ -403,14 +486,13 @@ async def get_agent_payload(
     Retrieve a pre-built agent payload from Redis.
 
     After scrape_page completes, each agent's input payload is already
-    stored in Redis. Call this to fetch the data for a specific agent
-    without re-running the scraper.
+    stored in Redis. Fetch it here without re-running the scraper.
 
     Args:
         agent      : One of nlp | visual | pricing | behavioral |
                      screenshot | text | dom
         scrape_id  : The scrape_id returned by scrape_page
-        session_id : The session_id used when scraping
+        session_id : The session_id used during scraping
 
     Returns:
         JSON string of the agent-specific payload, or error dict
@@ -437,9 +519,9 @@ async def get_agent_payload(
     raw = await redis.get(key)
     if not raw:
         return json.dumps({
-            "error": "payload_not_found",
+            "error":   "payload_not_found",
             "message": (
-                f"No payload for agent='{agent}' "
+                f"No payload found for agent='{agent}' "
                 f"scrape_id='{scrape_id}'. "
                 "It may have expired (TTL=10min) or the scrape failed."
             ),
@@ -457,9 +539,9 @@ async def get_session_history(session_id: str) -> str:
     """
     Return the ordered scrape history for a session.
 
-    Returns an ordered list of scrape metadata objects, one per page
+    Returns an ordered list of scrape metadata objects — one per page
     visited in this browser tab. Used by the Orchestrator to decide
-    routing — e.g. is there a preceding product page for price comparison?
+    routing, e.g. is there a preceding product page for price comparison?
 
     Args:
         session_id : The session ID
@@ -495,7 +577,7 @@ async def run_nlp_detection(scrape_id: str, session_id: str) -> str:
     Detects:
       DP01 — False Urgency
       DP02 — Confirm Shaming
-      DP03 — Disguised Ads
+      DP03 — Disguised Ads  (text-based)
       DP04 — Trick Question
 
     Runs four detector nodes in parallel via LangGraph fan-out.
@@ -531,12 +613,12 @@ async def run_pricing_detection(scrape_id: str, session_id: str) -> str:
     Run Pricing Agent dark pattern detection on a cart/checkout page.
 
     Detects:
-      DP05 — Drip Pricing  (hidden fees appearing only at checkout)
+      DP05 — Drip Pricing  (hidden mandatory fees appearing only at checkout)
       DP06 — Bait and Switch  (price increased between product page and cart)
 
     Requires the scrape_id of a CART, CHECKOUT, or PAYMENT page.
-    For bait-and-switch detection a prior product page scrape in the
-    same session is needed to compare prices.
+    For bait-and-switch a prior product page scrape in the same
+    session is needed to compare prices.
 
     Args:
         scrape_id  : ID from a scrape_page call on a cart/checkout page
@@ -568,14 +650,15 @@ async def run_behavioral_detection(scrape_id: str, session_id: str) -> str:
     Run Behavioral Agent dark pattern detection on a scraped page.
 
     Detects:
-      DP07 — Basket Sneaking  (items auto-added to cart)
-      DP08 — Subscription Trap  (hidden recurring billing)
-      DP09 — Nagging  (repeated popups after dismissal)
-      DP10 — SaaS Billing  (deceptive subscription pricing)
-      DP11 — Rogue and Malicious Content  (misleading links/buttons)
+      DP07 — Basket Sneaking
+      DP08 — Subscription Trap
+      DP09 — Nagging
+      DP10 — SaaS Billing
+      DP11 — Rogue and Malicious Content
+      DP13 — Forced Action
 
-    Runs five detector nodes in parallel via LangGraph fan-out.
-    Returns a behavioral severity score (0–10) in addition to
+    Runs six detector nodes in parallel via LangGraph fan-out.
+    Returns behavioral_severity_score (0–10) in addition to
     per-pattern detection results.
 
     Args:
@@ -584,7 +667,8 @@ async def run_behavioral_detection(scrape_id: str, session_id: str) -> str:
                      for nagging detection
 
     Returns:
-        JSON with per-pattern results and behavioral_severity_score
+        JSON with per-pattern results, behavioral_severity_score,
+        and severity_label (none/low/medium/high/critical)
     """
     from agents.behavioral_agent.runner import run_behavioral_agent
 
@@ -596,6 +680,47 @@ async def run_behavioral_detection(scrape_id: str, session_id: str) -> str:
         return json.dumps(result, default=str)
     except Exception as exc:
         logger.error("mcp_behavioral_error", error=str(exc), exc_info=True)
+        return json.dumps({"error": str(exc)})
+
+
+# ─────────────────────────────────────────────────────────────
+#  MCP TOOL: run_visual_detection
+# ─────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def run_visual_detection(scrape_id: str, session_id: str) -> str:
+    """
+    Run Visual Agent dark pattern detection using GPT-4o vision.
+
+    Detects:
+      DP03 — Disguised Ads  (visual: sponsored content styled as organic)
+      DP12 — Interface Interference  (button asymmetry, hidden close buttons,
+              consent dialog visual manipulation, checkbox visual tricks)
+
+    Both detector nodes run in parallel via LangGraph fan-out.
+    Each node sends the page screenshot + structured DOM context to
+    GPT-4o vision simultaneously.
+
+    IMPORTANT: Call this within 10 minutes of scrape_page.
+    Screenshots have a 10-minute TTL. If expired, re-scrape first.
+
+    Args:
+        scrape_id  : ID from a completed scrape_page call
+        session_id : Session ID used during scraping
+
+    Returns:
+        JSON with per-pattern visual detection results and evidence
+    """
+    from agents.visual_agent.runner import run_visual_agent
+
+    try:
+        result = await run_visual_agent(
+            scrape_id=scrape_id,
+            session_id=session_id,
+        )
+        return json.dumps(result, default=str)
+    except Exception as exc:
+        logger.error("mcp_visual_detection_error", error=str(exc), exc_info=True)
         return json.dumps({"error": str(exc)})
 
 
@@ -642,7 +767,7 @@ async def store_detection(
         "stored":    True,
         "scrape_id": scrape_id,
         "backend":   "redis_stub",
-        "note":      "Full SQLite + Qdrant persistence in Phase 4",
+        "note":      "Full SQLite + Qdrant persistence in Phase 4.",
     })
 
 
@@ -659,7 +784,7 @@ async def fetch_similar_patterns(
     """
     Find similar previously-detected dark patterns using vector search.
 
-    Used by NLP Agent to enrich prompts with real historical examples
+    Used by agents to enrich prompts with real historical examples
     from the Qdrant vector store (RAG pattern).
 
     NOTE: Full Qdrant implementation in Phase 4.
@@ -681,7 +806,7 @@ async def fetch_similar_patterns(
     )
     return json.dumps({
         "matches": [],
-        "note":    "Qdrant vector search integration pending (Phase 4)",
+        "note":    "Qdrant vector search integration pending (Phase 4).",
     })
 
 

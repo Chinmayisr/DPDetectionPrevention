@@ -1,0 +1,1 @@
+"""Visual Agent — detects Interface Interference (DP12) and Disguised Ads (DP03) using GPT-4o vision."""

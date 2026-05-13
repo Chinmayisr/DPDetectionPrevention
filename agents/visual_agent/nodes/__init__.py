@@ -1,0 +1,1 @@
+"""Visual Agent detector nodes."""
