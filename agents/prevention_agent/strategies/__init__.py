@@ -1,0 +1,1 @@
+"""Prevention strategies — one module per dark pattern (DP01–DP13)."""

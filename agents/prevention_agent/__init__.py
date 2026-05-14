@@ -1,0 +1,1 @@
+"""Prevention Agent — builds DOM patch instructions for all 13 dark patterns."""
