@@ -66,7 +66,7 @@ mcp = FastMCP("dark-guard-mcp")
 @app.on_event("startup")
 async def startup() -> None:
     logger.info("mcp_server_starting", port=settings.mcp_port)
-    await init_browser_pool()
+    
     await get_redis_client()
     logger.info("mcp_server_ready")
 
@@ -556,7 +556,7 @@ async def fetch_similar_patterns(
 #  MOUNT MCP + RUN
 # ═════════════════════════════════════════════════════════════
 
-app.mount("/mcp", mcp.get_asgi_app())
+app.mount("/mcp", mcp.sse_app())
 
 
 if __name__ == "__main__":
