@@ -3,6 +3,8 @@
    ───────────────────────────────────────────────────────────── */
 
 /* ── CSS Variables ─────────────────────────────────────────── */
+/* Ensure hidden attribute always wins over display rules */
+[hidden] { display: none !important; }
 :root {
   --bg:            #f8fafc;
   --surface:       #ffffff;

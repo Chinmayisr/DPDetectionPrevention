@@ -9,6 +9,11 @@
  *   - Manage scan history (last 20 entries)
  *   - Send DOM highlight instructions to content script
  *   - Fire browser notifications for high-severity detections
+ *
+ * FIX (v1.0.1):
+ *   - Rewrites localhost URLs to host.docker.internal before sending to
+ *     the backend, so Playwright inside Docker can reach pages running
+ *     on the host machine (e.g. localhost:8080/sale).
  */
 
 'use strict';
@@ -17,9 +22,9 @@
 // CONSTANTS
 // ─────────────────────────────────────────────────────────────
 
-const DEFAULT_BACKEND_URL  = 'http://localhost:8000';
-const SCAN_CACHE_TTL_MS    = 10 * 60 * 1000;   // 10 minutes
-const MAX_HISTORY_ITEMS    = 20;
+const DEFAULT_BACKEND_URL = 'http://localhost:8000';
+const SCAN_CACHE_TTL_MS   = 10 * 60 * 1000;   // 10 minutes
+const MAX_HISTORY_ITEMS   = 20;
 
 const SEVERITY_COLORS = {
   none:     '#16a34a',   // green
@@ -37,12 +42,14 @@ const scanningTabs = new Set();
 // ─────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const existing = await chrome.storage.local.get(['session_id', 'settings', 'scan_history']);
+  const existing = await chrome.storage.local.get([
+    'session_id', 'settings', 'scan_history',
+  ]);
 
   if (!existing.session_id) {
     await chrome.storage.local.set({
-      session_id:          generateUUID(),
-      session_page_count:  0,
+      session_id:         generateUUID(),
+      session_page_count: 0,
     });
   }
 
@@ -117,7 +124,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // ─────────────────────────────────────────────────────────────
 
 async function handlePageLoaded(url, tabId) {
-  if (!tabId) return;
+  if (!tabId)                  return;
 
   const settings = await getSettings();
   if (!settings.auto_scan)     return;
@@ -158,13 +165,22 @@ async function runScan(url, tabId) {
 
   try {
     const stored     = await chrome.storage.local.get(['session_id', 'settings']);
-    const sessionId  = stored.session_id  || generateUUID();
+    const sessionId  = stored.session_id || generateUUID();
     const backendUrl = stored.settings?.backend_url || DEFAULT_BACKEND_URL;
+
+    // ── Rewrite localhost → host.docker.internal ──────────────
+    // Playwright runs inside Docker. When it tries to scrape a URL
+    // like http://localhost:8080/sale, "localhost" inside the container
+    // resolves to the container itself — not the host machine.
+    // host.docker.internal always resolves to the host machine's IP
+    // from inside Docker Desktop (Windows and Mac).
+    const scrapeUrl = rewriteLocalhostForDocker(url);
+    // ─────────────────────────────────────────────────────────
 
     const response = await fetch(`${backendUrl}/api/v1/scan`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ url, session_id: sessionId }),
+      body:    JSON.stringify({ url: scrapeUrl, session_id: sessionId }),
     });
 
     if (!response.ok) {
@@ -173,7 +189,7 @@ async function runScan(url, tabId) {
 
     const result = await response.json();
 
-    // Cache result
+    // Cache result (keyed on original url so popup lookup works)
     await chrome.storage.local.set({
       [cacheKey(url)]: { result, timestamp: Date.now(), url },
     });
@@ -187,7 +203,7 @@ async function runScan(url, tabId) {
     // Update badge
     updateBadge(tabId, { result, timestamp: Date.now(), url });
 
-    // Browser notification for high/critical
+    // Browser notification for high/critical severity
     const settings = stored.settings || {};
     if (settings.notifications && result.total_detected > 0) {
       const sev = result.overall_severity_label;
@@ -214,7 +230,12 @@ async function runScan(url, tabId) {
   } catch (error) {
     // Store error state so popup can display it
     await chrome.storage.local.set({
-      [cacheKey(url)]: { result: null, error: error.message, timestamp: Date.now(), url },
+      [cacheKey(url)]: {
+        result:    null,
+        error:     error.message,
+        timestamp: Date.now(),
+        url,
+      },
     });
 
     chrome.action.setBadgeText({ text: '!', tabId });
@@ -252,7 +273,10 @@ function updateBadge(tabId, cached) {
   const count    = result.total_detected || 0;
   const severity = result.overall_severity_label || 'none';
 
-  chrome.action.setBadgeText({ text: count === 0 ? '✓' : String(count), tabId });
+  chrome.action.setBadgeText({
+    text: count === 0 ? '✓' : String(count),
+    tabId,
+  });
   chrome.action.setBadgeBackgroundColor({
     color: count === 0 ? '#16a34a' : (SEVERITY_COLORS[severity] || '#d97706'),
     tabId,
@@ -268,12 +292,12 @@ async function addToHistory(url, result) {
 
   const entry = {
     url,
-    timestamp:       Date.now(),
-    total_detected:  result.total_detected       || 0,
-    severity_label:  result.overall_severity_label || 'none',
-    severity_score:  result.overall_severity_score || 0,
-    page_type:       result.page_type              || 'OTHER',
-    scan_duration_ms:result.scan_duration_ms       || 0,
+    timestamp:        Date.now(),
+    total_detected:   result.total_detected        || 0,
+    severity_label:   result.overall_severity_label || 'none',
+    severity_score:   result.overall_severity_score || 0,
+    page_type:        result.page_type               || 'OTHER',
+    scan_duration_ms: result.scan_duration_ms        || 0,
     detected_patterns: (result.detected_patterns || []).map(p => ({
       pattern_code: p.pattern_code,
       pattern_name: p.pattern_name,
@@ -297,8 +321,8 @@ async function getScanResult(url) {
 async function getCachedResult(url) {
   const data   = await chrome.storage.local.get(cacheKey(url));
   const cached = data[cacheKey(url)];
-  if (!cached)                                        return null;
-  if (Date.now() - cached.timestamp > SCAN_CACHE_TTL_MS) return null;
+  if (!cached)                                             return null;
+  if (Date.now() - cached.timestamp > SCAN_CACHE_TTL_MS)  return null;
   return cached;
 }
 
@@ -338,6 +362,31 @@ function extractSelectors(patterns) {
     }
   }
   return result;
+}
+
+/**
+ * Rewrite localhost/127.0.0.1 URLs so Playwright inside Docker
+ * can reach pages running on the host machine.
+ *
+ * Examples:
+ *   http://localhost:8080/sale  →  http://host.docker.internal:8080/sale
+ *   http://127.0.0.1:3000/     →  http://host.docker.internal:3000/
+ *   https://example.com/       →  https://example.com/  (unchanged)
+ */
+function rewriteLocalhostForDocker(url) {
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.hostname === 'localhost' ||
+      parsed.hostname === '127.0.0.1'
+    ) {
+      parsed.hostname = 'host.docker.internal';
+      return parsed.toString();
+    }
+  } catch {
+    // Malformed URL — return as-is and let the backend handle the error
+  }
+  return url;
 }
 
 function isValidUrl(url) {
