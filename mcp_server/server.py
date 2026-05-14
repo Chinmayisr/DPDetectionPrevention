@@ -34,7 +34,6 @@ from pydantic import BaseModel
 
 from backend.cache.redis_client import get_redis_client
 from backend.cache.session_store import SessionStore
-from backend.scraper.browser_pool import close_browser_pool, init_browser_pool
 from backend.scraper.playwright_scraper import scrape
 from mcp_server.tools.scrape_tool import handle_scrape_page
 from config import get_settings
@@ -64,7 +63,6 @@ mcp = FastMCP("dark-guard-mcp")
 @app.on_event("startup")
 async def startup() -> None:
     logger.info("mcp_server_starting", port=settings.mcp_port)
-    await init_browser_pool()
     await get_redis_client()
     logger.info("mcp_server_ready")
 
@@ -72,7 +70,6 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     logger.info("mcp_server_stopping")
-    await close_browser_pool()
 
 
 # ─────────────────────────────────────────────────────────────

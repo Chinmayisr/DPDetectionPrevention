@@ -67,6 +67,7 @@ class BehavioralAgentState(TypedDict):
     nagging_result:           Annotated[SinglePatternResult | None, _merge_result]
     saas_billing_result:      Annotated[SinglePatternResult | None, _merge_result]
     rogue_malicious_result:   Annotated[SinglePatternResult | None, _merge_result]
+    forced_action_result:     Annotated[SinglePatternResult | None, _merge_result] 
 
     # ── Final output ───────────────────────────────────────────
     aggregated_result: dict | None

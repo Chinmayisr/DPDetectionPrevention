@@ -87,6 +87,7 @@ services:
       - ./agents:/app/agents
       - ./vector_store:/app/vector_store
       - sqlite_data:/app/data
+      - ./config.py:/app/config.py 
 
     networks:
       - dark-guard-net
@@ -126,6 +127,7 @@ services:
       - ./backend:/app/backend
       - ./agents:/app/agents
       - ./config.py:/app/config.py
+      
 
     networks:
       - dark-guard-net

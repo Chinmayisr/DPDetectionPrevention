@@ -2,7 +2,7 @@
 agents/shared/models.py
 ─────────────────────────────────────────────────────────────────
 Canonical detection result schemas shared across all agents.
-Covers all 11 dark pattern codes (DP01–DP11).
+Covers all 13 dark pattern codes (DP01–DP13).
 """
 from __future__ import annotations
 
@@ -62,6 +62,8 @@ PATTERN_AGENT_MAP: dict[DarkPatternCode, str] = {
     DarkPatternCode.NAGGING:          "behavioral",
     DarkPatternCode.SAAS_BILLING:     "behavioral",
     DarkPatternCode.ROGUE_MALICIOUS:  "behavioral",
+    DarkPatternCode.FORCED_ACTION:    "behavioral",   # ← added
+    DarkPatternCode.INTERFACE_INTERFERENCE: "visual",
 }
 
 

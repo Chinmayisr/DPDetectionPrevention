@@ -106,6 +106,22 @@ _SIMILARITY_THRESHOLD = 0.75
 _NAGGING_COUNT_THRESHOLD = 2
 
 
+# ── Safe string helper ────────────────────────────────────────
+
+def _s(val) -> str:
+    """
+    Return val as a non-None string.
+
+    Handles the case where a Pydantic Optional field (str | None)
+    is serialised to Redis as JSON null and deserialised as a dict
+    with key present but value None.
+
+    dict.get("key", "") returns None when key exists with null value.
+    (val or "") handles both None and the empty string case.
+    """
+    return val if isinstance(val, str) else ""
+
+
 def _text_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a[:200], b[:200]).ratio()
 
@@ -135,28 +151,31 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # 1. BASKET SNEAKING SIGNALS
     # ─────────────────────────────────────────────────────────
     prev_item_names = {
-        (i.get("name") or "").lower().strip()
+        (_s(i.get("name"))).lower().strip()
         for i in previous_cart
         if i.get("name")
     }
     new_items: list[dict] = []
     for item in current_cart:
-        name = (item.get("name") or "").lower().strip()
+        name = _s(item.get("name")).lower().strip()
         if name and name not in prev_item_names:
             new_items.append(item)
 
     auto_cart_mutation_count = len(auto_cart_mutations)
-    cart_mutation_urls = [r.get("url", "") for r in auto_cart_mutations]
+    # FIX: use _s() so None url values don't propagate
+    cart_mutation_urls = [_s(r.get("url")) for r in auto_cart_mutations]
 
     cart_dom_mutations: list[dict] = []
     for m in mutations:
-        sel = m.get("target_selector", "")
+        # FIX: target_selector is str | None in DomMutation
+        sel = _s(m.get("target_selector"))
         if sel and _CART_ENDPOINTS.search(sel):
             cart_dom_mutations.append(m)
 
     sneaking_text_signals: list[str] = []
     for t in text_elements:
-        text = t.get("text", "")
+        # FIX: use _s() — TextElement.text is required but Redis null is possible
+        text = _s(t.get("text"))
         if re.search(
             r"included|pre.selected|automatically\s+added|"
             r"complimentary|free\s+add|protect\s+your|"
@@ -164,7 +183,7 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
             text, re.IGNORECASE
         ) and len(text) < 200:
             sneaking_text_signals.append(
-                f"[{t.get('location','?')}] {text[:150]}"
+                f"[{_s(t.get('location'))}] {text[:150]}"
             )
 
     basket_sneaking_signals = {
@@ -185,9 +204,10 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     fine_print_subscription: list[str] = []
 
     for t in text_elements:
-        text = t.get("text", "")
-        tag  = t.get("tag", "")
-        loc  = t.get("location", "")
+        # FIX: all three fields use _s()
+        text = _s(t.get("text"))
+        tag  = _s(t.get("tag"))
+        loc  = _s(t.get("location"))
         if _SUBSCRIPTION_KW.search(text) and len(text) < 300:
             entry = f"[{tag}|{loc}] {text[:150]}"
             subscription_kw_found.append(entry)
@@ -196,13 +216,14 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
 
     ambiguous_cta: list[str] = []
     for b in buttons:
-        btn_text = (b.get("text") or "").strip()
+        # safe — already uses `or ""`
+        btn_text = (_s(b.get("text"))).strip()
         if _SUBSCRIPTION_CTA.search(btn_text) and len(btn_text) < 100:
             ambiguous_cta.append(btn_text[:80])
 
     pre_checked_count = 0
     for form in forms:
-        pre_checked_count += form.get("pre_checked_count", 0)
+        pre_checked_count += form.get("pre_checked_count", 0) or 0
         for field in form.get("fields", []):
             if field.get("input_type") == "checkbox" and field.get("is_pre_checked"):
                 pre_checked_count += 1
@@ -216,7 +237,8 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
 
     subscription_api_calls: list[str] = []
     for req in network_requests:
-        url = req.get("url", "")
+        # FIX: url is required in NetworkRequest but could be null in Redis dict
+        url = _s(req.get("url"))
         if re.search(
             r"subscribe|subscription|billing|checkout|payment|trial",
             url, re.IGNORECASE
@@ -239,10 +261,14 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # ─────────────────────────────────────────────────────────
     popup_groups: list[list[dict]] = []
     for entry in popup_timeline:
-        text = entry.get("text", "")[:200]
+        # FIX: popup_timeline dicts have text built from overlay.get("text", "")
+        # in the runner — but the overlay text itself could be None in Redis
+        text = _s(entry.get("text"))[:200]
         placed = False
         for group in popup_groups:
-            if _text_similarity(text, group[0].get("text", "")[:200]) >= _SIMILARITY_THRESHOLD:
+            # FIX: same _s() protection for the group comparison
+            group_text = _s(group[0].get("text"))[:200]
+            if _text_similarity(text, group_text) >= _SIMILARITY_THRESHOLD:
                 group.append(entry)
                 placed = True
                 break
@@ -254,20 +280,26 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         if len(group) >= _NAGGING_COUNT_THRESHOLD:
             repeated_groups.append({
                 "count":  len(group),
-                "text":   group[0].get("text", "")[:150],
-                "pages":  [e.get("url", "") for e in group],
+                # FIX: _s() on group text
+                "text":   _s(group[0].get("text"))[:150],
+                "pages":  [_s(e.get("url")) for e in group],
             })
 
     notification_requests: list[str] = []
     for t in text_elements:
-        if _NOTIFICATION_KW.search(t.get("text", "")):
+        # FIX: _s() so _NOTIFICATION_KW.search never receives None
+        text = _s(t.get("text"))
+        if _NOTIFICATION_KW.search(text):
             notification_requests.append(
-                f"[{t.get('location','?')}] {t.get('text','')[:100]}"
+                f"[{_s(t.get('location'))}] {text[:100]}"
             )
     for o in current_overlays:
-        if _NOTIFICATION_KW.search(o.get("text", "")):
+        # FIX: _s() on overlay text — OverlayElement.text is required but
+        # Redis deserialisation can produce null
+        overlay_text = _s(o.get("text"))
+        if _NOTIFICATION_KW.search(overlay_text):
             notification_requests.append(
-                f"[overlay] {o.get('text','')[:100]}"
+                f"[overlay] {overlay_text[:100]}"
             )
 
     total_autonomous = sum(
@@ -296,9 +328,10 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     intro_price_signals: list[str] = []
 
     for t in text_elements:
-        text = t.get("text", "")
-        tag  = t.get("tag", "")
-        loc  = t.get("location", "")
+        # FIX: _s() on all three
+        text = _s(t.get("text"))
+        tag  = _s(t.get("tag"))
+        loc  = _s(t.get("location"))
 
         if not _SAAS_BILLING_KW.search(text):
             continue
@@ -320,14 +353,14 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     price_anchoring: list[dict] = []
     for p in prices:
         if p.get("original_price") and p.get("amount"):
-            orig = p["original_price"]
+            orig    = p["original_price"]
             current = p["amount"]
             if orig > current:
                 price_anchoring.append({
-                    "original": orig,
-                    "current":  current,
+                    "original":    orig,
+                    "current":     current,
                     "discount_pct": round(((orig - current) / orig) * 100, 1),
-                    "text": p.get("text", "")[:80],
+                    "text": _s(p.get("text"))[:80],
                 })
 
     saas_billing_signals = {
@@ -350,8 +383,11 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     medium_traps: list[dict] = []
 
     for trap in redirect_traps:
-        actual_href  = trap.get("actual_href", "")
-        text         = trap.get("text", "")
+        # FIX: LinkElement.actual_href is str | None — the original bug.
+        # .get("actual_href", "") returns None when key exists with null value.
+        # _s() converts None → "" safely.
+        actual_href  = _s(trap.get("actual_href"))
+        text         = _s(trap.get("text"))
         is_sponsored = trap.get("is_sponsored", False)
         mismatch     = trap.get("domain_mismatch", False)
 
@@ -380,21 +416,23 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
 
     download_buttons: list[str] = []
     for b in buttons:
-        btn_text = (b.get("text") or "").lower()
-        href = (b.get("actual_href") or b.get("href") or "")
+        btn_text = _s(b.get("text")).lower()
+        # FIX: actual_href is Optional — _s() covers None
+        href = _s(b.get("actual_href")) or _s(b.get("href"))
         if re.search(r"download|install|get\s+it|free\s+download", btn_text):
             if _ROGUE_REDIRECT_PATTERNS.search(href) or b.get("domain_mismatch"):
                 download_buttons.append(
-                    f"text='{b.get('text','')[:60]}' href='{href[:80]}'"
+                    f"text='{_s(b.get('text'))[:60]}' href='{href[:80]}'"
                 )
 
     injected_links: list[str] = []
     for m in mutations:
         if m.get("added_nodes_count", 0) > 0:
-            sel = m.get("target_selector", "")
+            # FIX: target_selector is str | None in DomMutation
+            sel = _s(m.get("target_selector"))
             if sel and re.search(r"a\[|link|href|anchor", sel, re.IGNORECASE):
                 injected_links.append(
-                    f"selector={sel} at {m.get('timestamp_ms',0):.0f}ms"
+                    f"selector={sel} at {m.get('timestamp_ms', 0):.0f}ms"
                 )
 
     rogue_malicious_signals = {
@@ -410,35 +448,36 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     }
 
     # ─────────────────────────────────────────────────────────
-    # 6. FORCED ACTION SIGNALS  ← NEW
+    # 6. FORCED ACTION SIGNALS
     # ─────────────────────────────────────────────────────────
 
     # Gate language in text elements
     gate_text_signals: list[str] = []
     for t in text_elements:
-        text = t.get("text", "")
+        text = _s(t.get("text"))
         if _FORCED_GATE_KW.search(text) and len(text) < 300:
             gate_text_signals.append(
-                f"[{t.get('tag','?')}|{t.get('location','?')}] {text[:200]}"
+                f"[{_s(t.get('tag'))}|{_s(t.get('location'))}] {text[:200]}"
             )
 
     # Blocking overlays — overlays that gate access
     blocking_overlays: list[dict] = []
     for o in current_overlays:
-        overlay_text = o.get("text", "")
+        # FIX: _s() on overlay text before passing to regex
+        overlay_text = _s(o.get("text"))
         is_blocking = (
             o.get("blocks_interaction", False) or
-            o.get("viewport_coverage_pct", 0) > 40 or
+            (o.get("viewport_coverage_pct") or 0) > 40 or
             _BLOCKING_OVERLAY_KW.search(overlay_text)
         )
         if is_blocking:
             blocking_overlays.append({
-                "type":        o.get("overlay_type", ""),
-                "coverage":    o.get("viewport_coverage_pct", 0),
-                "text":        overlay_text[:150],
-                "has_close":   o.get("has_close_button", False),
-                "blocks":      o.get("blocks_interaction", False),
-                "autonomous":  o.get("appeared_autonomously", False),
+                "type":       _s(o.get("overlay_type")),
+                "coverage":   o.get("viewport_coverage_pct") or 0,
+                "text":       overlay_text[:150],
+                "has_close":  o.get("has_close_button", False),
+                "blocks":     o.get("blocks_interaction", False),
+                "autonomous": o.get("appeared_autonomously", False),
             })
 
     # Required form fields that shouldn't be required
@@ -448,20 +487,28 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
             f for f in form.get("fields", [])
             if f.get("is_required") and not f.get("is_hidden")
         ]
-        # Flag forms with phone number required (often unnecessary)
         phone_required = any(
-            re.search(r"phone|mobile|tel|cell", f.get("name", "") + f.get("label_text", ""), re.IGNORECASE)
+            re.search(
+                r"phone|mobile|tel|cell",
+                # FIX: both name and label_text are Optional in FormField
+                _s(f.get("name")) + _s(f.get("label_text")),
+                re.IGNORECASE,
+            )
             for f in required_fields
         )
-        # Flag forms where marketing consent is required
         consent_required = any(
-            re.search(r"newsletter|marketing|promotions|offers", f.get("label_text", ""), re.IGNORECASE)
+            re.search(
+                r"newsletter|marketing|promotions|offers",
+                # FIX: label_text is Optional
+                _s(f.get("label_text")),
+                re.IGNORECASE,
+            )
             and f.get("is_required")
             for f in form.get("fields", [])
         )
         if phone_required or consent_required:
             excessive_required_fields.append({
-                "form_action":      form.get("action", ""),
+                "form_action":      _s(form.get("action")),
                 "phone_required":   phone_required,
                 "consent_required": consent_required,
                 "field_count":      len(required_fields),
@@ -470,19 +517,19 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # Notification permission as gate
     notification_gate: list[str] = []
     for t in text_elements:
-        text = t.get("text", "")
+        text = _s(t.get("text"))
         if (
             _NOTIFICATION_KW.search(text) and
             re.search(r"to\s+(continue|access|proceed|use|view)", text, re.IGNORECASE)
         ):
             notification_gate.append(
-                f"[{t.get('location','?')}] {text[:150]}"
+                f"[{_s(t.get('location'))}] {text[:150]}"
             )
 
     # Guest checkout blocked detection
     guest_checkout_blocked: list[str] = []
     for t in text_elements:
-        text = t.get("text", "")
+        text = _s(t.get("text"))
         if re.search(
             r"guest\s+checkout\s+(not\s+)?(available|allowed|supported|possible)|"
             r"must\s+(create|have)\s+an?\s+account|"
@@ -491,18 +538,22 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
             text, re.IGNORECASE
         ):
             guest_checkout_blocked.append(
-                f"[{t.get('location','?')}] {text[:150]}"
+                f"[{_s(t.get('location'))}] {text[:150]}"
             )
 
-    # Network requests blocked by forced action
-    # (navigation requests that only fire after form submit)
+    # Network requests triggered only after forced form submit
     blocked_navigation: list[str] = []
     for req in network_requests:
-        url = req.get("url", "")
-        method = req.get("method", "")
+        # FIX: both url and method are required in NetworkRequest but
+        # could be null in the Redis-deserialized dict
+        url    = _s(req.get("url"))
+        method = _s(req.get("method"))
         if (
             method == "POST" and
-            re.search(r"register|signup|sign.up|login|log.in|auth|subscribe", url, re.IGNORECASE) and
+            re.search(
+                r"register|signup|sign.up|login|log.in|auth|subscribe",
+                url, re.IGNORECASE,
+            ) and
             req.get("is_auto_triggered", False)
         ):
             blocked_navigation.append(url[:150])
@@ -510,7 +561,7 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
     # Forced social login detection
     forced_social_login: list[str] = []
     for b in buttons:
-        btn_text = (b.get("text") or "").strip()
+        btn_text = _s(b.get("text")).strip()
         if re.search(
             r"continue\s+with\s+(google|facebook|apple|twitter|github)|"
             r"sign\s+in\s+with\s+(google|facebook|apple)|"
@@ -562,5 +613,5 @@ def preprocess_node(state: BehavioralAgentState) -> dict:
         "nagging_signals":           nagging_signals,
         "saas_billing_signals":      saas_billing_signals,
         "rogue_malicious_signals":   rogue_malicious_signals,
-        "forced_action_signals":     forced_action_signals,   # ← NEW
+        "forced_action_signals":     forced_action_signals,
     }
