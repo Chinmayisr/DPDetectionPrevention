@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dark Guard AI</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+  <!-- ═══════════════ HEADER ═══════════════ -->
+  <header class="header">
+    <div class="header-brand">
+      <span class="brand-shield">🛡️</span>
+      <span class="brand-name">Dark Guard <span class="brand-ai">AI</span></span>
+    </div>
+    <div class="header-session">
+      <span class="session-icon">🔗</span>
+      <span id="session-page-count">0</span>&nbsp;pages
+    </div>
+  </header>
+
+  <!-- ═══════════════ CURRENT URL BAR ═══════════════ -->
+  <div class="url-bar">
+    <span class="url-bar-icon">🌐</span>
+    <span class="url-bar-text" id="current-url" title="">Loading...</span>
+  </div>
+
+  <!-- ═══════════════ TABS ═══════════════ -->
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-tab="results">
+      <span>Results</span>
+    </button>
+    <button class="tab-btn" data-tab="history">
+      <span>History</span>
+    </button>
+    <button class="tab-btn" data-tab="settings">
+      <span>Settings</span>
+    </button>
+  </nav>
+
+  <!-- ═══════════════ RESULTS TAB ═══════════════ -->
+  <div class="tab-panel active" id="tab-results">
+
+    <!-- LOADING -->
+    <div class="state-view" id="state-loading" hidden>
+      <div class="spinner-wrap">
+        <div class="spinner"></div>
+      </div>
+      <p class="state-heading">Scanning for dark patterns…</p>
+      <p class="state-sub">This may take up to 30 seconds</p>
+    </div>
+
+    <!-- CLEAN -->
+    <div class="state-view" id="state-clean" hidden>
+      <div class="state-icon state-icon--clean">✓</div>
+      <p class="state-heading">No dark patterns detected</p>
+      <p class="state-sub" id="clean-summary"></p>
+    </div>
+
+    <!-- ERROR -->
+    <div class="state-view" id="state-error" hidden>
+      <div class="state-icon state-icon--error">!</div>
+      <p class="state-heading">Scan failed</p>
+      <p class="state-sub state-sub--error" id="error-message"></p>
+    </div>
+
+    <!-- IDLE -->
+    <div class="state-view" id="state-idle" hidden>
+      <div class="state-icon state-icon--idle">🔍</div>
+      <p class="state-heading">Page not scanned yet</p>
+      <p class="state-sub">Auto-scan may be off, or this is your first visit.</p>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="state-results" hidden>
+
+      <!-- Severity Banner -->
+      <div class="severity-banner" id="severity-banner">
+        <div class="severity-left">
+          <span class="severity-count" id="severity-count">0</span>
+          <span class="severity-label-text">dark patterns found</span>
+        </div>
+        <span class="severity-chip" id="severity-chip">NONE</span>
+      </div>
+
+      <!-- Financial Impact Alert -->
+      <div class="alert alert--financial" id="financial-alert" hidden>
+        <span class="alert-icon">⚠️</span>
+        <div>
+          <strong>Hidden charges detected</strong>
+          <div class="alert-detail" id="financial-detail"></div>
+        </div>
+      </div>
+
+      <!-- Agent Errors Warning -->
+      <div class="alert alert--warning" id="agent-error-alert" hidden>
+        <span class="alert-icon">⚠️</span>
+        <span>Some agents encountered errors. Results may be incomplete.</span>
+      </div>
+
+      <!-- Pattern List -->
+      <div class="pattern-list" id="pattern-list"></div>
+
+      <!-- Synthesis -->
+      <div class="synthesis-card" id="synthesis-card" hidden>
+        <p class="synthesis-label">AI Summary</p>
+        <p class="synthesis-text" id="synthesis-text"></p>
+      </div>
+
+      <!-- Scan Meta -->
+      <div class="scan-meta" id="scan-meta">
+        <span id="meta-page-type" class="meta-chip"></span>
+        <span id="meta-duration"  class="meta-chip"></span>
+        <span id="meta-agents"    class="meta-chip"></span>
+        <span id="meta-iterations" class="meta-chip"></span>
+      </div>
+
+    </div><!-- /#state-results -->
+
+    <!-- Action Bar -->
+    <div class="action-bar">
+      <button class="btn btn--primary" id="btn-scan">
+        🔍 Scan Page
+      </button>
+      <button class="btn btn--secondary" id="btn-export" hidden>
+        ⬇️ Export JSON
+      </button>
+    </div>
+
+  </div><!-- /#tab-results -->
+
+
+  <!-- ═══════════════ HISTORY TAB ═══════════════ -->
+  <div class="tab-panel" id="tab-history" hidden>
+
+    <div class="panel-header">
+      <span class="panel-title">Recent Scans</span>
+      <button class="btn-link btn-link--danger" id="btn-clear-history">Clear all</button>
+    </div>
+
+    <div class="history-list" id="history-list">
+      <div class="empty-state">No scan history yet</div>
+    </div>
+
+  </div>
+
+
+  <!-- ═══════════════ SETTINGS TAB ═══════════════ -->
+  <div class="tab-panel" id="tab-settings" hidden>
+
+    <!-- Backend URL -->
+    <div class="settings-group">
+      <label class="settings-label" for="setting-backend-url">Backend URL</label>
+      <input type="text" class="settings-input" id="setting-backend-url"
+             placeholder="http://localhost:8000">
+      <p class="settings-hint">URL of your Dark Guard AI backend</p>
+    </div>
+
+    <!-- Auto Scan -->
+    <div class="settings-group">
+      <div class="settings-row">
+        <div class="settings-row-left">
+          <label class="settings-label">Auto-Scan Pages</label>
+          <p class="settings-hint">Automatically scan each page you visit</p>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="setting-auto-scan">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Notifications -->
+    <div class="settings-group">
+      <div class="settings-row">
+        <div class="settings-row-left">
+          <label class="settings-label">Notifications</label>
+          <p class="settings-hint">Alert on high-severity detections</p>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="setting-notifications">
+          <span class="toggle-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Confidence Threshold -->
+    <div class="settings-group">
+      <label class="settings-label">
+        Confidence Threshold:
+        <strong id="threshold-display">70%</strong>
+      </label>
+      <input type="range" class="settings-slider" id="setting-threshold"
+             min="50" max="95" step="5" value="70">
+      <div class="slider-labels">
+        <span>50% (more detections)</span>
+        <span>95% (fewer, certain)</span>
+      </div>
+    </div>
+
+    <!-- Session Card -->
+    <div class="settings-group">
+      <label class="settings-label">Session</label>
+      <div class="session-card">
+        <div class="session-row">
+          <span class="session-row-label">Session ID</span>
+          <span class="session-id-text" id="session-id-display">—</span>
+        </div>
+        <div class="session-row">
+          <span class="session-row-label">Pages scanned</span>
+          <strong id="session-pages-display">0</strong>
+        </div>
+      </div>
+      <button class="btn btn--danger btn--full" id="btn-reset-session">
+        🔄 Reset Session
+      </button>
+      <p class="settings-hint">
+        Resets cross-page detection context. Pricing and Behavioral
+        comparisons start fresh after a reset.
+      </p>
+    </div>
+
+    <!-- Save -->
+    <div class="settings-footer">
+      <button class="btn btn--primary btn--full" id="btn-save-settings">
+        Save Settings
+      </button>
+      <span class="save-status" id="save-status"></span>
+    </div>
+
+  </div><!-- /#tab-settings -->
+
+  <script src="popup.js"></script>
+</body>
+</html>
