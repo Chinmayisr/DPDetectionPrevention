@@ -68,6 +68,7 @@ class ConfirmShamingStrategy(BaseStrategy):
                     "append_note"  : "(reworded by Dark Guard)",
                 },
                 description = f"Neutral rewrite: '{original_text}' → '{neutral_text}'",
+                text_hint   = original_text,
             ))
 
             # 2 — highlight the button so the user notices it was modified
@@ -79,6 +80,7 @@ class ConfirmShamingStrategy(BaseStrategy):
                     "style_override" : "border:2px solid #f9a825!important;",
                 },
                 description = "Yellow border on rewritten opt-out button",
+                text_hint   = original_text,
             ))
 
         return patches

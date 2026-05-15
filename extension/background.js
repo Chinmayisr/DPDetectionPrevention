@@ -1,414 +1,609 @@
 /**
- * background.js — Dark Guard AI Service Worker
+ * background.js — Dark Guard AI
  *
  * Responsibilities:
- *   - Session management (generate + persist session_id)
- *   - Receive PAGE_LOADED / MANUAL_SCAN messages from content script
- *   - Call POST /api/v1/scan and cache results in chrome.storage.local
- *   - Update extension badge (count + colour) after each scan
- *   - Manage scan history (last 20 entries)
- *   - Send DOM highlight instructions to content script
- *   - Fire browser notifications for high-severity detections
- *
- * FIX (v1.0.1):
- *   - Rewrites localhost URLs to host.docker.internal before sending to
- *     the backend, so Playwright inside Docker can reach pages running
- *     on the host machine (e.g. localhost:8080/sale).
+ *  - Maintain browsing session
+ *  - Trigger backend scans
+ *  - Store scan results
+ *  - Update extension badge
+ *  - Send highlight instructions
+ *  - Send prevention patch instructions
  */
 
 'use strict';
 
 // ─────────────────────────────────────────────────────────────
-// CONSTANTS
+// CONFIG
 // ─────────────────────────────────────────────────────────────
 
-const DEFAULT_BACKEND_URL = 'http://localhost:8000';
-const SCAN_CACHE_TTL_MS   = 10 * 60 * 1000;   // 10 minutes
-const MAX_HISTORY_ITEMS   = 20;
-
-const SEVERITY_COLORS = {
-  none:     '#16a34a',   // green
-  low:      '#65a30d',   // lime
-  medium:   '#d97706',   // amber
-  high:     '#dc2626',   // red
-  critical: '#7f1d1d',   // dark red
+const DEFAULT_SETTINGS = {
+  backend_url: 'http://localhost:8000',
+  auto_scan: true,
+  notifications: true,
+  confidence_threshold: 0.70,
 };
 
-// Tabs currently being scanned (tabId → true)
-const scanningTabs = new Set();
+const SCAN_DEBOUNCE_MS = 2500;
 
 // ─────────────────────────────────────────────────────────────
-// INSTALLATION — seed defaults
+// GLOBAL STATE
+// ─────────────────────────────────────────────────────────────
+
+const activeScans = new Map();
+const recentScans = new Map();
+
+let currentSessionId = crypto.randomUUID();
+let sessionPageCount = 0;
+
+// ─────────────────────────────────────────────────────────────
+// INIT
 // ─────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const existing = await chrome.storage.local.get([
-    'session_id', 'settings', 'scan_history',
-  ]);
 
-  if (!existing.session_id) {
+  console.log('[DarkGuard] Extension installed');
+
+  const stored =
+    await chrome.storage.local.get([
+      'settings',
+      'session_id',
+      'session_page_count',
+    ]);
+
+  if (!stored.settings) {
     await chrome.storage.local.set({
-      session_id:         generateUUID(),
-      session_page_count: 0,
+      settings: DEFAULT_SETTINGS,
     });
   }
 
-  if (!existing.settings) {
+  if (stored.session_id) {
+    currentSessionId = stored.session_id;
+  } else {
     await chrome.storage.local.set({
-      settings: {
-        backend_url:          DEFAULT_BACKEND_URL,
-        auto_scan:            true,
-        confidence_threshold: 0.70,
-        notifications:        true,
-      },
+      session_id: currentSessionId,
     });
   }
 
-  if (!existing.scan_history) {
-    await chrome.storage.local.set({ scan_history: [] });
-  }
+  sessionPageCount =
+    stored.session_page_count || 0;
+
+  updateBadge('ON', '#2563eb');
 });
 
 // ─────────────────────────────────────────────────────────────
-// TAB EVENTS — reset badge on navigation
+// MESSAGE LISTENER
 // ─────────────────────────────────────────────────────────────
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'loading' && changeInfo.url) {
-    chrome.action.setBadgeText({ text: '...', tabId });
-    chrome.action.setBadgeBackgroundColor({ color: '#9E9E9E', tabId });
+chrome.runtime.onMessage.addListener(
+  (message, sender, sendResponse) => {
+
+    (async () => {
+
+      try {
+
+        // ─────────────────────────
+        // PAGE LOADED
+        // ─────────────────────────
+
+        if (message.type === 'PAGE_LOADED') {
+
+          const settings =
+            await getSettings();
+
+          if (!settings.auto_scan) {
+            sendResponse({ ok: true });
+            return;
+          }
+
+          const tabId =
+            sender.tab?.id;
+
+          if (!tabId) {
+            sendResponse({ ok: false });
+            return;
+          }
+
+          triggerScan(
+            message.url,
+            tabId,
+          );
+
+          sendResponse({ ok: true });
+
+          return;
+        }
+
+        // ─────────────────────────
+        // MANUAL SCAN
+        // ─────────────────────────
+
+        if (message.type === 'MANUAL_SCAN') {
+
+          triggerScan(
+            message.url,
+            message.tabId,
+            true,
+          );
+
+          sendResponse({ ok: true });
+
+          return;
+        }
+
+        // ─────────────────────────
+        // GET STATUS
+        // ─────────────────────────
+
+        if (message.type === 'GET_STATUS') {
+
+          sendResponse({
+            scanning:
+              activeScans.has(message.tabId),
+          });
+
+          return;
+        }
+
+        // ─────────────────────────
+        // GET SCAN RESULT
+        // ─────────────────────────
+
+        if (
+          message.type ===
+          'GET_SCAN_RESULT'
+        ) {
+
+          const key =
+            cacheKey(message.url);
+
+          const result =
+            recentScans.get(key);
+
+          sendResponse(result || null);
+
+          return;
+        }
+
+        // ─────────────────────────
+        // RESET SESSION
+        // ─────────────────────────
+
+        if (message.type === 'RESET_SESSION') {
+
+          currentSessionId =
+            crypto.randomUUID();
+
+          sessionPageCount = 0;
+
+          await chrome.storage.local.set({
+            session_id: currentSessionId,
+            session_page_count:
+              sessionPageCount,
+          });
+
+          sendResponse({
+            status: 'reset',
+          });
+
+          return;
+        }
+
+      } catch (err) {
+
+        console.error(
+          '[DarkGuard] Background error:',
+          err
+        );
+
+        sendResponse({
+          ok: false,
+          error: String(err),
+        });
+      }
+
+    })();
+
+    return true;
   }
-});
+);
 
 // ─────────────────────────────────────────────────────────────
-// MESSAGE HANDLER
+// SCAN PIPELINE
 // ─────────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+async function triggerScan(
+  url,
+  tabId,
+  force = false
+) {
 
-  switch (message.type) {
-
-    case 'PAGE_LOADED':
-      handlePageLoaded(message.url, sender.tab?.id);
-      sendResponse({ status: 'received' });
-      break;
-
-    case 'MANUAL_SCAN':
-      handleManualScan(message.url, message.tabId);
-      sendResponse({ status: 'scanning' });
-      break;
-
-    case 'RESET_SESSION':
-      resetSession()
-        .then(newId => sendResponse({ status: 'reset', session_id: newId }));
-      return true;   // async
-
-    case 'GET_SCAN_RESULT':
-      getScanResult(message.url)
-        .then(result => sendResponse(result));
-      return true;   // async
-
-    case 'GET_STATUS':
-      sendResponse({ scanning: scanningTabs.has(message.tabId) });
-      break;
-
-    default:
-      break;
-  }
-
-  return true;
-});
-
-// ─────────────────────────────────────────────────────────────
-// PAGE LOADED — auto-scan flow
-// ─────────────────────────────────────────────────────────────
-
-async function handlePageLoaded(url, tabId) {
-  if (!tabId)                  return;
-
-  const settings = await getSettings();
-  if (!settings.auto_scan)     return;
-  if (!isValidUrl(url))        return;
-  if (scanningTabs.has(tabId)) return;
-
-  // Return cached result within TTL
-  const cached = await getCachedResult(url);
-  if (cached) {
-    updateBadge(tabId, cached);
+  if (!url || !tabId) {
     return;
   }
 
-  await runScan(url, tabId);
-}
+  if (
+    !url.startsWith('http://') &&
+    !url.startsWith('https://')
+  ) {
+    return;
+  }
 
-// ─────────────────────────────────────────────────────────────
-// MANUAL SCAN — force fresh scan
-// ─────────────────────────────────────────────────────────────
+  const key = cacheKey(url);
 
-async function handleManualScan(url, tabId) {
-  if (!isValidUrl(url))        return;
-  if (scanningTabs.has(tabId)) return;
+  // Prevent duplicate scans
+  if (activeScans.has(tabId)) {
+    return;
+  }
 
-  // Clear cache so the scan always runs fresh
-  await chrome.storage.local.remove(cacheKey(url));
+  const existing =
+    recentScans.get(key);
 
-  await runScan(url, tabId);
-}
+  if (
+    existing &&
+    !force &&
+    Date.now() - existing.timestamp <
+      SCAN_DEBOUNCE_MS
+  ) {
+    return;
+  }
 
-// ─────────────────────────────────────────────────────────────
-// CORE: RUN SCAN
-// ─────────────────────────────────────────────────────────────
+  activeScans.set(tabId, true);
 
-async function runScan(url, tabId) {
-  scanningTabs.add(tabId);
-  setBadgeScanning(tabId);
+  updateBadge('...', '#f59e0b');
 
   try {
-    const stored     = await chrome.storage.local.get(['session_id', 'settings']);
-    const sessionId  = stored.session_id || generateUUID();
-    const backendUrl = stored.settings?.backend_url || DEFAULT_BACKEND_URL;
 
-    // ── Rewrite localhost → host.docker.internal ──────────────
-    // Playwright runs inside Docker. When it tries to scrape a URL
-    // like http://localhost:8080/sale, "localhost" inside the container
-    // resolves to the container itself — not the host machine.
-    // host.docker.internal always resolves to the host machine's IP
-    // from inside Docker Desktop (Windows and Mac).
-    const scrapeUrl = rewriteLocalhostForDocker(url);
-    // ─────────────────────────────────────────────────────────
+    const settings =
+      await getSettings();
 
-    const response = await fetch(`${backendUrl}/api/v1/scan`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ url: scrapeUrl, session_id: sessionId }),
+    const backendUrl =
+      settings.backend_url;
+
+    sessionPageCount++;
+
+    await chrome.storage.local.set({
+      session_page_count:
+        sessionPageCount,
     });
+
+    console.log(
+      '[DarkGuard] Starting scan:',
+      url
+    );
+
+    // ─────────────────────────
+    // Backend request
+    // ─────────────────────────
+
+    const response = await fetch(
+      `${backendUrl}/api/v1/scan`,
+      {
+        method: 'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json',
+        },
+
+        body: JSON.stringify({
+          url,
+          session_id:
+            currentSessionId,
+        }),
+      }
+    );
 
     if (!response.ok) {
-      throw new Error(`Backend returned HTTP ${response.status}`);
+
+      throw new Error(
+        `Backend scan failed: ${response.status}`
+      );
     }
 
-    const result = await response.json();
+    const result =
+      await response.json();
 
-    // Cache result (keyed on original url so popup lookup works)
-    await chrome.storage.local.set({
-      [cacheKey(url)]: { result, timestamp: Date.now(), url },
-    });
+    console.log(
+      '[DarkGuard] Scan result:',
+      result
+    );
 
-    // Update history
-    await addToHistory(url, result);
+    // ─────────────────────────
+    // Cache result
+    // ─────────────────────────
 
-    // Increment session page count
-    await incrementSessionPageCount();
+    const cachedResult = {
+      result,
+      timestamp: Date.now(),
+      url,
+    };
 
-    // Update badge
-    updateBadge(tabId, { result, timestamp: Date.now(), url });
+    recentScans.set(
+      key,
+      cachedResult,
+    );
 
-    // Browser notification for high/critical severity
-    const settings = stored.settings || {};
-    if (settings.notifications && result.total_detected > 0) {
-      const sev = result.overall_severity_label;
-      if (sev === 'high' || sev === 'critical') {
-        chrome.notifications.create(`scan_${Date.now()}`, {
-          type:     'basic',
-          iconUrl:  'icons/icon48.png',
-          title:    'Dark Guard AI — Warning',
-          message:  `${result.total_detected} dark pattern(s) detected. Severity: ${sev.toUpperCase()}`,
-          priority: 2,
-        });
+    // ─────────────────────────
+    // Store history
+    // ─────────────────────────
+
+    await appendHistory(result, url);
+
+    // ─────────────────────────
+    // Badge update
+    // ─────────────────────────
+
+    updateResultBadge(result);
+
+    // ─────────────────────────
+    // Highlight instructions
+    // ─────────────────────────
+
+    const patterns =
+      result.all_detected_patterns ||
+      [];
+
+    const highlightPayload =
+      buildHighlightPayload(patterns);
+
+    try {
+
+      await chrome.tabs.sendMessage(
+        tabId,
+        {
+          type:
+            'HIGHLIGHT_ELEMENTS',
+          patterns:
+            highlightPayload,
+        }
+      );
+
+      console.log(
+        '[DarkGuard] Highlight instructions sent'
+      );
+
+    } catch (err) {
+
+      console.warn(
+        '[DarkGuard] Highlight send failed:',
+        err
+      );
+    }
+
+    // ─────────────────────────
+    // Prevention patches
+    // ─────────────────────────
+
+    const patches =
+      result?.prevention
+        ?.patch_instructions || [];
+
+    if (patches.length) {
+
+      try {
+
+        await chrome.tabs.sendMessage(
+          tabId,
+          {
+            type: 'APPLY_PATCHES',
+            patches,
+          }
+        );
+
+        console.log(
+          '[DarkGuard] Prevention patches sent:',
+          patches.length
+        );
+
+      } catch (err) {
+
+        console.error(
+          '[DarkGuard] Failed sending patches:',
+          err
+        );
       }
     }
 
-    // Send DOM highlight instructions to content script
-    const selectors = extractSelectors(result.detected_patterns || []);
-    if (selectors.length > 0) {
-      chrome.tabs.sendMessage(tabId, {
-        type:     'HIGHLIGHT_ELEMENTS',
-        patterns: selectors,
-      }).catch(() => {});   // content script may not be present on all pages
+    // ─────────────────────────
+    // Notification
+    // ─────────────────────────
+
+    if (
+      settings.notifications &&
+      (result.total_detected || 0) > 0
+    ) {
+
+      chrome.notifications.create({
+        type: 'basic',
+
+        iconUrl:
+          'icons/icon128.png',
+
+        title:
+          'Dark Guard Warning',
+
+        message:
+          `${result.total_detected} dark pattern(s) detected on this page.`,
+      });
     }
 
-  } catch (error) {
-    // Store error state so popup can display it
-    await chrome.storage.local.set({
-      [cacheKey(url)]: {
-        result:    null,
-        error:     error.message,
+  } catch (err) {
+
+    console.error(
+      '[DarkGuard] Scan failed:',
+      err
+    );
+
+    recentScans.set(
+      key,
+      {
+        error: String(err),
         timestamp: Date.now(),
         url,
-      },
-    });
+      }
+    );
 
-    chrome.action.setBadgeText({ text: '!', tabId });
-    chrome.action.setBadgeBackgroundColor({ color: '#dc2626', tabId });
+    updateBadge('ERR', '#dc2626');
 
   } finally {
-    scanningTabs.delete(tabId);
+
+    activeScans.delete(tabId);
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// BADGE HELPERS
+// HELPERS
 // ─────────────────────────────────────────────────────────────
 
-function setBadgeScanning(tabId) {
-  chrome.action.setBadgeText({ text: '...', tabId });
-  chrome.action.setBadgeBackgroundColor({ color: '#9E9E9E', tabId });
-}
+function buildHighlightPayload(
+  patterns
+) {
 
-function updateBadge(tabId, cached) {
-  if (!cached) {
-    chrome.action.setBadgeText({ text: '', tabId });
-    return;
-  }
+  const output = [];
 
-  if (cached.error) {
-    chrome.action.setBadgeText({ text: '!', tabId });
-    chrome.action.setBadgeBackgroundColor({ color: '#dc2626', tabId });
-    return;
-  }
+  patterns.forEach(pattern => {
 
-  const result = cached.result;
-  if (!result) return;
+    const evidence =
+      pattern.evidence || [];
 
-  const count    = result.total_detected || 0;
-  const severity = result.overall_severity_label || 'none';
+    evidence.forEach(ev => {
 
-  chrome.action.setBadgeText({
-    text: count === 0 ? '✓' : String(count),
-    tabId,
+      if (
+        ev.selector &&
+        pattern.detected
+      ) {
+
+        output.push({
+          selector:
+            ev.selector,
+
+          pattern_code:
+            pattern.pattern_code,
+
+          pattern_name:
+            pattern.pattern_name,
+
+          confidence:
+            pattern.confidence || 0,
+        });
+      }
+    });
   });
-  chrome.action.setBadgeBackgroundColor({
-    color: count === 0 ? '#16a34a' : (SEVERITY_COLORS[severity] || '#d97706'),
-    tabId,
-  });
+
+  return output;
 }
 
-// ─────────────────────────────────────────────────────────────
-// HISTORY
-// ─────────────────────────────────────────────────────────────
+async function appendHistory(
+  result,
+  url
+) {
 
-async function addToHistory(url, result) {
-  const { scan_history = [] } = await chrome.storage.local.get('scan_history');
+  const storage =
+    await chrome.storage.local.get(
+      'scan_history'
+    );
 
-  const entry = {
+  const history =
+    storage.scan_history || [];
+
+  history.unshift({
+    timestamp: Date.now(),
+
     url,
-    timestamp:        Date.now(),
-    total_detected:   result.total_detected        || 0,
-    severity_label:   result.overall_severity_label || 'none',
-    severity_score:   result.overall_severity_score || 0,
-    page_type:        result.page_type               || 'OTHER',
-    scan_duration_ms: result.scan_duration_ms        || 0,
-    detected_patterns: (result.detected_patterns || []).map(p => ({
-      pattern_code: p.pattern_code,
-      pattern_name: p.pattern_name,
-      confidence:   p.confidence,
-    })),
-  };
 
-  const updated = [entry, ...scan_history].slice(0, MAX_HISTORY_ITEMS);
-  await chrome.storage.local.set({ scan_history: updated });
-}
+    total_detected:
+      result.total_detected || 0,
 
-// ─────────────────────────────────────────────────────────────
-// UTILITIES
-// ─────────────────────────────────────────────────────────────
+    severity_label:
+      result
+        .overall_severity_label ||
+      'none',
 
-async function getScanResult(url) {
-  const data = await chrome.storage.local.get(cacheKey(url));
-  return data[cacheKey(url)] || null;
-}
+    all_detected_patterns:
+      result
+        .all_detected_patterns || [],
+  });
 
-async function getCachedResult(url) {
-  const data   = await chrome.storage.local.get(cacheKey(url));
-  const cached = data[cacheKey(url)];
-  if (!cached)                                             return null;
-  if (Date.now() - cached.timestamp > SCAN_CACHE_TTL_MS)  return null;
-  return cached;
+  // Keep only latest 50
+  const trimmed =
+    history.slice(0, 50);
+
+  await chrome.storage.local.set({
+    scan_history: trimmed,
+  });
 }
 
 async function getSettings() {
-  const { settings } = await chrome.storage.local.get('settings');
-  return settings || {
-    backend_url:          DEFAULT_BACKEND_URL,
-    auto_scan:            true,
-    confidence_threshold: 0.70,
-    notifications:        true,
+
+  const storage =
+    await chrome.storage.local.get(
+      'settings'
+    );
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(storage.settings || {}),
   };
 }
 
-async function resetSession() {
-  const newId = generateUUID();
-  await chrome.storage.local.set({ session_id: newId, session_page_count: 0 });
-  return newId;
-}
+function updateResultBadge(
+  result
+) {
 
-async function incrementSessionPageCount() {
-  const { session_page_count = 0 } = await chrome.storage.local.get('session_page_count');
-  await chrome.storage.local.set({ session_page_count: session_page_count + 1 });
-}
+  const count =
+    result.total_detected || 0;
 
-function extractSelectors(patterns) {
-  const result = [];
-  for (const pattern of patterns) {
-    for (const ev of (pattern.evidence || [])) {
-      if (ev.css_selector) {
-        result.push({
-          selector:     ev.css_selector,
-          pattern_code: pattern.pattern_code,
-          pattern_name: pattern.pattern_name,
-          confidence:   pattern.confidence,
-        });
-      }
-    }
+  if (count === 0) {
+
+    updateBadge('✓', '#16a34a');
+
+    return;
   }
-  return result;
-}
 
-/**
- * Rewrite localhost/127.0.0.1 URLs so Playwright inside Docker
- * can reach pages running on the host machine.
- *
- * Examples:
- *   http://localhost:8080/sale  →  http://host.docker.internal:8080/sale
- *   http://127.0.0.1:3000/     →  http://host.docker.internal:3000/
- *   https://example.com/       →  https://example.com/  (unchanged)
- */
-function rewriteLocalhostForDocker(url) {
-  try {
-    const parsed = new URL(url);
-    if (
-      parsed.hostname === 'localhost' ||
-      parsed.hostname === '127.0.0.1'
-    ) {
-      parsed.hostname = 'host.docker.internal';
-      return parsed.toString();
-    }
-  } catch {
-    // Malformed URL — return as-is and let the backend handle the error
+  if (count >= 5) {
+
+    updateBadge(
+      String(count),
+      '#dc2626'
+    );
+
+    return;
   }
-  return url;
+
+  updateBadge(
+    String(count),
+    '#ea580c'
+  );
 }
 
-function isValidUrl(url) {
-  return url && (url.startsWith('http://') || url.startsWith('https://'));
-}
+function updateBadge(
+  text,
+  color
+) {
 
-function generateUUID() {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0;
-    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  chrome.action.setBadgeText({
+    text,
+  });
+
+  chrome.action.setBadgeBackgroundColor({
+    color,
   });
 }
 
 function cacheKey(url) {
+
   try {
-    const p = new URL(url);
-    // Key on origin + pathname — ignore query params to improve cache hit rate
-    const raw = p.origin + p.pathname;
-    return 'result_' + btoa(unescape(encodeURIComponent(raw)))
-                           .replace(/[^a-zA-Z0-9]/g, '')
-                           .slice(0, 50);
+
+    const parsed =
+      new URL(url);
+
+    return (
+      parsed.origin +
+      parsed.pathname
+    );
+
   } catch {
-    return 'result_' + btoa(url).replace(/[^a-zA-Z0-9]/g, '').slice(0, 50);
+
+    return url;
   }
 }

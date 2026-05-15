@@ -48,6 +48,7 @@ class FalseUrgencyStrategy(BaseStrategy):
                     "position": "before",
                 },
                 description  = f"Neutralize urgency: {reason}",
+                text_hint    = text,
             ))
 
             # 2 — if text looks like stock scarcity, rewrite it
@@ -58,6 +59,7 @@ class FalseUrgencyStrategy(BaseStrategy):
                     action       = "replace_text",
                     payload      = {"new_text": "Limited availability may apply"},
                     description  = "Rewrite stock scarcity claim to neutral form",
+                    text_hint    = text,
                 ))
 
             # 3 — add info badge
@@ -71,6 +73,7 @@ class FalseUrgencyStrategy(BaseStrategy):
                     "title"   : "Dark Guard: This urgency claim may be artificial.",
                 },
                 description  = "Badge: urgency flag",
+                text_hint    = text,
             ))
 
         return patches

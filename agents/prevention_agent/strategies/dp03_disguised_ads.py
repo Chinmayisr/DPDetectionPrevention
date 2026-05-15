@@ -33,6 +33,7 @@ class DisguisedAdsStrategy(BaseStrategy):
 
         for ev in evidence:
             selector   = self._selector(ev)
+            ev_text    = self._text(ev)
             confidence = float(ev.get("confidence", 0.7))
 
             if confidence >= 0.8:
@@ -47,6 +48,7 @@ class DisguisedAdsStrategy(BaseStrategy):
                         "position": "prepend",
                     },
                     description = "Inject SPONSORED badge (high confidence disguised ad)",
+                    text_hint   = ev_text,
                 ))
             else:
                 # Medium confidence — softer dashed border only
@@ -61,6 +63,7 @@ class DisguisedAdsStrategy(BaseStrategy):
                         ),
                     },
                     description = "Dashed border: possible disguised ad (medium confidence)",
+                    text_hint   = ev_text,
                 ))
 
         return patches

@@ -1,391 +1,595 @@
-
 /**
- * content.js
+ * content.js — Dark Guard AI Content Script
  *
- * Dark Guard AI
- *
- * Handles:
- * - DOM scanning hooks
- * - prevention patch execution
- * - live UI mitigation
- * - overlay highlighting
+ * Responsibilities:
+ *   1. Detect page loads + SPA navigations
+ *   2. Receive highlight instructions
+ *   3. Receive prevention patch instructions
+ *   4. Apply live DOM mitigation
  */
 
 'use strict';
 
+console.log('[DarkGuard] content.js loaded');
+
 // ─────────────────────────────────────────────────────────────
-// GLOBAL STATE
+// STATE
 // ─────────────────────────────────────────────────────────────
 
-window.__darkGuardAppliedPatches = new Set();
-window.__darkGuardLatestResult = null;
+let lastReportedUrl = '';
+
+const activeTooltips = [];
+const activePatches = [];
+
+// ─────────────────────────────────────────────────────────────
+// PAGE LOAD DETECTION
+// ─────────────────────────────────────────────────────────────
+
+function notifyPageLoad(url) {
+  if (!url || url === lastReportedUrl) {
+    return;
+  }
+
+  if (
+    !url.startsWith('http://') &&
+    !url.startsWith('https://')
+  ) {
+    return;
+  }
+
+  lastReportedUrl = url;
+
+  clearHighlights();
+  clearPatches();
+
+  try {
+    chrome.runtime.sendMessage(
+      {
+        type: 'PAGE_LOADED',
+        url,
+      },
+      () => {
+        void chrome.runtime.lastError;
+      }
+    );
+  } catch {
+    // Ignore
+  }
+}
+
+// Initial load
+if (
+  document.readyState === 'complete' ||
+  document.readyState === 'interactive'
+) {
+  notifyPageLoad(window.location.href);
+} else {
+  window.addEventListener(
+    'DOMContentLoaded',
+    () => notifyPageLoad(window.location.href)
+  );
+}
+
+// Full page load fallback
+window.addEventListener(
+  'load',
+  () => notifyPageLoad(window.location.href)
+);
+
+// ─────────────────────────────────────────────────────────────
+// SPA NAVIGATION DETECTION
+// ─────────────────────────────────────────────────────────────
+
+const urlObserver = new MutationObserver(() => {
+  const currentUrl = window.location.href;
+
+  if (currentUrl !== lastReportedUrl) {
+    notifyPageLoad(currentUrl);
+  }
+});
+
+urlObserver.observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+});
+
+window.addEventListener(
+  'popstate',
+  () => notifyPageLoad(window.location.href)
+);
+
+window.addEventListener(
+  'hashchange',
+  () => notifyPageLoad(window.location.href)
+);
+
+// Patch history API
+(function patchHistory() {
+  const push = history.pushState.bind(history);
+  const replace = history.replaceState.bind(history);
+
+  history.pushState = function (...args) {
+    push(...args);
+
+    setTimeout(() => {
+      notifyPageLoad(window.location.href);
+    }, 150);
+  };
+
+  history.replaceState = function (...args) {
+    replace(...args);
+
+    setTimeout(() => {
+      notifyPageLoad(window.location.href);
+    }, 150);
+  };
+})();
 
 // ─────────────────────────────────────────────────────────────
 // MESSAGE LISTENER
 // ─────────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  try {
-    switch (message.type) {
+chrome.runtime.onMessage.addListener((message) => {
 
-      // ─────────────────────────────
-      // APPLY SCAN RESULT
-      // ─────────────────────────────
+  console.log(
+    '[DarkGuard] Message received:',
+    message.type
+  );
 
-      case 'APPLY_SCAN_RESULT': {
-        const result = message.result;
+  // ─────────────────────────────
+  // Highlight detections
+  // ─────────────────────────────
 
-        if (!result) {
-          sendResponse({ ok: false });
-          return true;
-        }
+  if (message.type === 'HIGHLIGHT_ELEMENTS') {
+    clearHighlights();
 
-        window.__darkGuardLatestResult = result;
-
-        // Highlight detections
-        renderDetectionHighlights(result);
-
-        // Execute prevention patches
-        applyPreventionStrategies(result.prevention);
-
-        // Start observer
-        initializeMutationObserver(result.prevention);
-
-        sendResponse({ ok: true });
-
-        return true;
-      }
-
-      // ─────────────────────────────
-      // CLEAR PATCHES
-      // ─────────────────────────────
-
-      case 'CLEAR_PATCHES': {
-        clearDarkGuardArtifacts();
-
-        sendResponse({ ok: true });
-
-        return true;
-      }
+    for (const item of (message.patterns || [])) {
+      highlightElement(
+        item.selector,
+        item.pattern_code,
+        item.pattern_name,
+        item.confidence
+      );
     }
-  } catch (err) {
-    console.error('[DarkGuard] content.js error:', err);
-
-    sendResponse({
-      ok: false,
-      error: String(err),
-    });
   }
 
-  return true;
+  // ─────────────────────────────
+  // Apply prevention patches
+  // ─────────────────────────────
+
+  if (message.type === 'APPLY_PATCHES') {
+
+    console.log(
+      '[DarkGuard] Applying patches:',
+      message.patches
+    );
+
+    clearPatches();
+
+    for (const patch of (message.patches || [])) {
+      applyPatch(patch);
+    }
+  }
 });
 
 // ─────────────────────────────────────────────────────────────
-// PREVENTION ENGINE
+// HIGHLIGHTING
 // ─────────────────────────────────────────────────────────────
 
-function applyPreventionStrategies(prevention) {
-  if (!prevention?.patch_instructions) {
-    return;
-  }
+function clearHighlights() {
+  activeTooltips.forEach(el => el.remove());
 
-  prevention.patch_instructions
-    .sort((a, b) => (a.priority || 0) - (b.priority || 0))
-    .forEach(patch => {
-      try {
-        executePatch(patch);
-      } catch (err) {
-        console.error(
-          '[DarkGuard] Prevention patch failed:',
-          err,
-          patch,
-        );
-      }
+  activeTooltips.length = 0;
+
+  document
+    .querySelectorAll('[data-darkguard-code]')
+    .forEach(el => {
+      el.style.outline = '';
+      el.style.outlineOffset = '';
+
+      el.removeAttribute('data-darkguard-code');
     });
 }
 
-function executePatch(patch) {
-  const selector = patch.css_selector || 'body';
+function highlightElement(
+  selector,
+  patternCode,
+  patternName,
+  confidence
+) {
+  let elements;
 
-  const elements = document.querySelectorAll(selector);
+  try {
+    elements =
+      document.querySelectorAll(selector);
+  } catch {
+    return;
+  }
+
+  if (!elements.length) {
+    return;
+  }
+
+  const color = patternColor(patternCode);
+
+  elements.forEach(el => {
+
+    el.style.outline =
+      `2px solid ${color}`;
+
+    el.style.outlineOffset = '2px';
+
+    el.setAttribute(
+      'data-darkguard-code',
+      patternCode
+    );
+
+    const tooltip =
+      document.createElement('div');
+
+    tooltip.style.cssText = `
+      position: fixed;
+      background: #1e293b;
+      color: #f1f5f9;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      z-index: 2147483647;
+      pointer-events: none;
+      display: none;
+      max-width: 280px;
+      border-left: 3px solid ${color};
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    `;
+
+    tooltip.innerHTML = `
+      <strong style="color:${color}">
+        ${patternCode}
+      </strong>
+      — ${patternName}
+      <br>
+      <span style="font-size:11px;color:#94a3b8">
+        Confidence:
+        ${Math.round(confidence * 100)}%
+      </span>
+    `;
+
+    document.body.appendChild(tooltip);
+
+    activeTooltips.push(tooltip);
+
+    el.addEventListener('mouseenter', () => {
+      const rect =
+        el.getBoundingClientRect();
+
+      tooltip.style.display = 'block';
+
+      tooltip.style.left =
+        `${Math.min(
+          rect.left,
+          window.innerWidth - 290
+        )}px`;
+
+      tooltip.style.top =
+        `${Math.min(
+          rect.bottom + 6,
+          window.innerHeight - 80
+        )}px`;
+    });
+
+    el.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+    });
+  });
+}
+
+function patternColor(code) {
+  const critical =
+    new Set(['DP08', 'DP11']);
+
+  const high =
+    new Set(['DP06', 'DP07', 'DP13']);
+
+  const medium =
+    new Set([
+      'DP01',
+      'DP02',
+      'DP04',
+      'DP05',
+      'DP10',
+      'DP12',
+    ]);
+
+  if (critical.has(code)) {
+    return '#dc2626';
+  }
+
+  if (high.has(code)) {
+    return '#ea580c';
+  }
+
+  if (medium.has(code)) {
+    return '#d97706';
+  }
+
+  return '#ca8a04';
+}
+
+// ─────────────────────────────────────────────────────────────
+// PATCH ENGINE
+// ─────────────────────────────────────────────────────────────
+
+function clearPatches() {
+  activePatches.forEach(el => {
+    try {
+      el.remove();
+    } catch {}
+  });
+
+  activePatches.length = 0;
+}
+
+function applyPatch(patch) {
+
+  console.log(
+    '[DarkGuard] Applying patch:',
+    patch.action,
+    patch
+  );
+
+  const selector =
+    patch.css_selector || 'body';
+
+  let elements = [];
+
+  try {
+    elements =
+      document.querySelectorAll(selector);
+  } catch {
+    return;
+  }
+
+  console.log(
+    '[DarkGuard] Resolved elements:',
+    elements.length,
+    selector
+  );
 
   if (!elements.length) {
     return;
   }
 
   elements.forEach(el => {
-    const patchKey = `${patch.action}:${selector}:${patch.description}`;
 
-    if (window.__darkGuardAppliedPatches.has(patchKey)) {
-      return;
-    }
+    try {
 
-    switch (patch.action) {
+      switch (patch.action) {
 
-      // ─────────────────────────────
-      // INJECT ELEMENT
-      // ─────────────────────────────
+        // ─────────────────────────
+        // REPLACE TEXT
+        // ─────────────────────────
 
-      case 'inject_element': {
-        const wrapper = document.createElement('div');
+        case 'replace_text': {
 
-        wrapper.innerHTML = patch.payload?.html || '';
+          const newText =
+            patch.payload?.new_text;
 
-        const node = wrapper.firstElementChild;
+          if (newText !== undefined) {
+            el.textContent = newText;
+          }
 
-        if (!node) return;
-
-        node.classList.add('dg-generated-node');
-
-        const position = patch.payload?.position || 'append';
-
-        if (position === 'before') {
-          el.prepend(node);
-        } else if (position === 'prepend') {
-          el.prepend(node);
-        } else if (position === 'after') {
-          el.append(node);
-        } else {
-          el.append(node);
+          break;
         }
 
-        break;
-      }
+        // ─────────────────────────
+        // INJECT ELEMENT
+        // ─────────────────────────
 
-      // ─────────────────────────────
-      // ADD CLASS
-      // ─────────────────────────────
+        case 'inject_element': {
 
-      case 'add_class': {
-        const classes = patch.payload?.classes || [];
+          const html =
+            patch.payload?.html || '';
 
-        classes.forEach(cls => {
-          el.classList.add(cls);
-        });
+          const position =
+            patch.payload?.position ||
+            'append';
 
-        if (patch.payload?.style_override) {
-          el.style.cssText += patch.payload.style_override;
+          const wrapper =
+            document.createElement('div');
+
+          wrapper.innerHTML = html;
+
+          const node =
+            wrapper.firstElementChild;
+
+          if (!node) {
+            return;
+          }
+
+          node.setAttribute(
+            'data-darkguard-patch',
+            '1'
+          );
+
+          switch (position) {
+
+            case 'before':
+              el.parentNode?.insertBefore(
+                node,
+                el
+              );
+              break;
+
+            case 'after':
+              el.parentNode?.insertBefore(
+                node,
+                el.nextSibling
+              );
+              break;
+
+            case 'prepend':
+              el.prepend(node);
+              break;
+
+            case 'append':
+            default:
+              el.append(node);
+              break;
+          }
+
+          activePatches.push(node);
+
+          break;
         }
 
-        break;
-      }
+        // ─────────────────────────
+        // ADD CLASS
+        // ─────────────────────────
 
-      // ─────────────────────────────
-      // ADD BADGE
-      // ─────────────────────────────
+        case 'add_class': {
 
-      case 'add_badge': {
-        const badge = document.createElement('span');
+          const classes =
+            patch.payload?.classes || [];
 
-        badge.className = 'dg-generated-node dg-badge';
+          classes.forEach(cls => {
+            el.classList.add(cls);
+          });
 
-        badge.innerText = patch.payload?.label || 'NOTICE';
+          if (
+            patch.payload?.style_override
+          ) {
+            el.style.cssText +=
+              ';' +
+              patch.payload.style_override;
+          }
 
-        badge.style.background =
-          patch.payload?.bg_color || '#ff9800';
-
-        badge.style.color =
-          patch.payload?.color || '#fff';
-
-        badge.style.fontSize = '11px';
-        badge.style.fontWeight = '700';
-        badge.style.padding = '2px 6px';
-        badge.style.borderRadius = '4px';
-        badge.style.marginRight = '6px';
-        badge.style.display = 'inline-block';
-        badge.style.zIndex = '999999';
-        badge.style.position = 'relative';
-
-        if (patch.payload?.title) {
-          badge.title = patch.payload.title;
+          break;
         }
 
-        el.prepend(badge);
+        // ─────────────────────────
+        // ADD BADGE
+        // ─────────────────────────
 
-        break;
-      }
+        case 'add_badge': {
 
-      // ─────────────────────────────
-      // HIDE ELEMENT
-      // ─────────────────────────────
+          const badge =
+            document.createElement('span');
 
-      case 'hide_element': {
-        el.style.display = 'none';
-        break;
-      }
+          badge.setAttribute(
+            'data-darkguard-badge',
+            '1'
+          );
 
-      // ─────────────────────────────
-      // REPLACE TEXT
-      // ─────────────────────────────
+          badge.textContent =
+            patch.payload?.label || '⚠';
 
-      case 'replace_text': {
-        const replacement = patch.payload?.text;
+          badge.title =
+            patch.payload?.title || '';
 
-        if (replacement) {
-          el.textContent = replacement;
+          badge.style.cssText = `
+            background:
+              ${patch.payload?.bg_color || '#f59e0b'};
+            color:
+              ${patch.payload?.color || '#fff'};
+            display:inline-block;
+            padding:2px 7px;
+            border-radius:3px;
+            font-size:11px;
+            font-weight:600;
+            margin-left:6px;
+            vertical-align:middle;
+            box-shadow:
+              0 1px 4px rgba(0,0,0,.3);
+            z-index:2147483647;
+          `;
+
+          el.parentNode?.insertBefore(
+            badge,
+            el.nextSibling
+          );
+
+          activePatches.push(badge);
+
+          break;
         }
 
-        break;
+        // ─────────────────────────
+        // INTERCEPT CLICK
+        // ─────────────────────────
+
+        case 'intercept_click': {
+
+          if (
+            el.dataset.darkguardIntercepted
+          ) {
+            break;
+          }
+
+          el.dataset.darkguardIntercepted =
+            '1';
+
+          el.addEventListener(
+            'click',
+            e => {
+
+              e.preventDefault();
+              e.stopImmediatePropagation();
+
+              const warning =
+                patch.payload?.warning_message ||
+                'Dark Guard detected a potentially deceptive action.';
+
+              const proceed =
+                confirm(
+                  `${warning}\n\nContinue anyway?`
+                );
+
+              if (proceed) {
+                delete el.dataset.darkguardIntercepted;
+
+                el.click();
+
+                el.dataset.darkguardIntercepted =
+                  '1';
+              }
+            },
+            true
+          );
+
+          break;
+        }
+
+        // ─────────────────────────
+        // UNCHECK
+        // ─────────────────────────
+
+        case 'uncheck': {
+
+          if (
+            el.type === 'checkbox' ||
+            el.type === 'radio'
+          ) {
+            el.checked = false;
+          }
+
+          break;
+        }
+
+        default:
+
+          console.warn(
+            '[DarkGuard] Unknown action:',
+            patch.action
+          );
       }
 
-      default:
-        console.warn(
-          '[DarkGuard] Unknown prevention action:',
-          patch.action,
-        );
-    }
+    } catch (err) {
 
-    window.__darkGuardAppliedPatches.add(patchKey);
+      console.error(
+        '[DarkGuard] Patch failed:',
+        err,
+        patch
+      );
+    }
   });
 }
-
-// ─────────────────────────────────────────────────────────────
-// DETECTION HIGHLIGHTING
-// ─────────────────────────────────────────────────────────────
-
-function renderDetectionHighlights(result) {
-  const patterns =
-    result?.all_detected_patterns || [];
-
-  patterns.forEach(pattern => {
-    (pattern.evidence || []).forEach(ev => {
-      if (!ev.text) return;
-
-      highlightText(ev.text);
-    });
-  });
-}
-
-function highlightText(text) {
-  if (!text || text.length < 3) {
-    return;
-  }
-
-  const walker = document.createTreeWalker(
-    document.body,
-    NodeFilter.SHOW_TEXT,
-  );
-
-  const matches = [];
-
-  while (walker.nextNode()) {
-    const node = walker.currentNode;
-
-    if (
-      node.textContent &&
-      node.textContent.includes(text)
-    ) {
-      matches.push(node);
-    }
-  }
-
-  matches.forEach(node => {
-    const parent = node.parentElement;
-
-    if (!parent) return;
-
-    parent.classList.add('dg-highlight');
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
-// MUTATION OBSERVER
-// ─────────────────────────────────────────────────────────────
-
-let darkGuardObserver = null;
-
-function initializeMutationObserver(prevention) {
-  if (darkGuardObserver) {
-    return;
-  }
-
-  darkGuardObserver = new MutationObserver(() => {
-    applyPreventionStrategies(prevention);
-  });
-
-  darkGuardObserver.observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────
-// CLEANUP
-// ─────────────────────────────────────────────────────────────
-
-function clearDarkGuardArtifacts() {
-  document
-    .querySelectorAll('.dg-generated-node')
-    .forEach(el => el.remove());
-
-  document
-    .querySelectorAll('.dg-highlight')
-    .forEach(el => {
-      el.classList.remove('dg-highlight');
-    });
-
-  window.__darkGuardAppliedPatches.clear();
-
-  if (darkGuardObserver) {
-    darkGuardObserver.disconnect();
-    darkGuardObserver = null;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// GLOBAL STYLES
-// ─────────────────────────────────────────────────────────────
-
-(function injectDarkGuardStyles() {
-  if (document.getElementById('darkguard-styles')) {
-    return;
-  }
-
-  const style = document.createElement('style');
-
-  style.id = 'darkguard-styles';
-
-  style.textContent = `
-
-    .dg-highlight {
-      outline: 2px solid #ef4444 !important;
-      outline-offset: 2px !important;
-      transition: outline 0.2s ease;
-    }
-
-    .dg-option-parity {
-      opacity: 1 !important;
-      visibility: visible !important;
-      font-size: 14px !important;
-      padding: 8px 14px !important;
-      border-radius: 6px !important;
-      cursor: pointer !important;
-    }
-
-    .dg-amplify-close {
-      min-width: 44px !important;
-      min-height: 44px !important;
-      font-size: 18px !important;
-      background: #fff !important;
-      border: 2px solid #111 !important;
-      color: #111 !important;
-      opacity: 1 !important;
-      z-index: 999999 !important;
-    }
-
-    .dg-badge {
-      font-family: sans-serif !important;
-      line-height: 1.2 !important;
-    }
-
-  `;
-
-  document.head.appendChild(style);
-})();
-
-// ─────────────────────────────────────────────────────────────
-// STARTUP LOG
-// ─────────────────────────────────────────────────────────────
-
-console.log('[DarkGuard] content.js loaded');
-

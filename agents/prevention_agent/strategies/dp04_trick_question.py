@@ -65,6 +65,7 @@ class TrickQuestionStrategy(BaseStrategy):
                 action       = "uncheck",
                 payload      = {"enforce_on_mutation": True},
                 description  = "Uncheck pre-checked trick question box",
+                text_hint    = text,
             ))
 
             # 2 — rewrite confusing label to plain language
@@ -78,6 +79,7 @@ class TrickQuestionStrategy(BaseStrategy):
                         "append_note" : "(clarified by Dark Guard)",
                     },
                     description = f"Plain-language rewrite: '{text}' → '{plain}'",
+                    text_hint   = text,
                 ))
 
             # 3 — inject ? tooltip explaining what checking/unchecking actually does
@@ -93,6 +95,7 @@ class TrickQuestionStrategy(BaseStrategy):
                     "position": "after",
                 },
                 description = "Inject tooltip explaining checkbox effect",
+                text_hint   = text,
             ))
 
         return patches

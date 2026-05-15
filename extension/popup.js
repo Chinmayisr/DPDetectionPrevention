@@ -1,12 +1,11 @@
 /**
- * popup.js — Dark Guard AI Popup Logic
+ * popup.js — Dark Guard AI Popup
  *
- * Updated for:
- * - Prevention agent schema
- * - all_detected_patterns support
- * - NaN fixes
- * - prevention rendering
- * - robust fallback handling
+ * Responsibilities:
+ *  - Display scan results
+ *  - Display prevention strategies
+ *  - Render scan history
+ *  - Manage settings
  */
 
 'use strict';
@@ -43,39 +42,59 @@ const SEVERITY_LABELS = {
 // INIT
 // ─────────────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', initPopup);
+document.addEventListener(
+  'DOMContentLoaded',
+  initPopup
+);
 
 async function initPopup() {
+
+  console.log(
+    '[DarkGuard] popup.js loaded'
+  );
+
   setupTabs();
   setupActionBar();
   setupSettings();
   setupHistory();
 
-  const [tab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true,
-  });
+  const [tab] =
+    await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
 
-  if (!tab) return;
-
-  displayUrl(tab.url);
-  await loadSessionInfo();
-
-  const status = await sendToBackground({
-    type: 'GET_STATUS',
-    tabId: tab.id,
-  });
-
-  if (status?.scanning) {
-    showState('loading');
-    pollForResult(tab.url, tab.id);
+  if (!tab) {
     return;
   }
 
-  const cached = await sendToBackground({
-    type: 'GET_SCAN_RESULT',
-    url: tab.url,
-  });
+  displayUrl(tab.url);
+
+  await loadSessionInfo();
+
+  const status =
+    await sendToBackground({
+      type: 'GET_STATUS',
+      tabId: tab.id,
+    });
+
+  if (status?.scanning) {
+
+    showState('loading');
+
+    pollForResult(
+      tab.url,
+      tab.id
+    );
+
+    return;
+  }
+
+  const cached =
+    await sendToBackground({
+      type: 'GET_SCAN_RESULT',
+      url: tab.url,
+    });
 
   if (cached) {
     renderCached(cached);
@@ -89,276 +108,444 @@ async function initPopup() {
 // ─────────────────────────────────────────────────────────────
 
 function setupTabs() {
-  document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const targetTab = btn.dataset.tab;
 
-      document.querySelectorAll('.tab-btn')
-        .forEach(b => b.classList.remove('active'));
+  document
+    .querySelectorAll('.tab-btn')
+    .forEach(btn => {
 
-      document.querySelectorAll('.tab-panel')
-        .forEach(p => p.hidden = true);
+      btn.addEventListener(
+        'click',
+        () => {
 
-      btn.classList.add('active');
+          const target =
+            btn.dataset.tab;
 
-      const panel = document.getElementById(`tab-${targetTab}`);
-      if (panel) {
-        panel.hidden = false;
-      }
+          document
+            .querySelectorAll('.tab-btn')
+            .forEach(b =>
+              b.classList.remove(
+                'active'
+              )
+            );
 
-      if (targetTab === 'history') {
-        loadHistory();
-      }
+          document
+            .querySelectorAll('.tab-panel')
+            .forEach(panel => {
+              panel.hidden = true;
+            });
+
+          btn.classList.add(
+            'active'
+          );
+
+          const panel =
+            document.getElementById(
+              `tab-${target}`
+            );
+
+          if (panel) {
+            panel.hidden = false;
+          }
+
+          if (target === 'history') {
+            loadHistory();
+          }
+        }
+      );
     });
-  });
 }
 
 // ─────────────────────────────────────────────────────────────
-// ACTION BAR
+// ACTIONS
 // ─────────────────────────────────────────────────────────────
 
 function setupActionBar() {
-  const scanBtn = document.getElementById('btn-scan');
+
+  const scanBtn =
+    document.getElementById(
+      'btn-scan'
+    );
 
   if (scanBtn) {
-    scanBtn.addEventListener('click', async () => {
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
 
-      if (!tab?.url) return;
+    scanBtn.addEventListener(
+      'click',
+      async () => {
 
-      showState('loading');
-      hideExportButton();
+        const [tab] =
+          await chrome.tabs.query({
+            active: true,
+            currentWindow: true,
+          });
 
-      sendToBackground({
-        type: 'MANUAL_SCAN',
-        url: tab.url,
-        tabId: tab.id,
-      });
+        if (!tab?.url) {
+          return;
+        }
 
-      pollForResult(tab.url, tab.id);
-    });
+        showState('loading');
+
+        sendToBackground({
+          type: 'MANUAL_SCAN',
+          url: tab.url,
+          tabId: tab.id,
+        });
+
+        pollForResult(
+          tab.url,
+          tab.id
+        );
+      }
+    );
   }
 
-  const exportBtn = document.getElementById('btn-export');
+  const exportBtn =
+    document.getElementById(
+      'btn-export'
+    );
 
   if (exportBtn) {
-    exportBtn.addEventListener('click', async () => {
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
 
-      if (!tab?.url) return;
+    exportBtn.addEventListener(
+      'click',
+      async () => {
 
-      const cached = await sendToBackground({
-        type: 'GET_SCAN_RESULT',
-        url: tab.url,
-      });
+        const [tab] =
+          await chrome.tabs.query({
+            active: true,
+            currentWindow: true,
+          });
 
-      if (!cached?.result) return;
+        if (!tab?.url) {
+          return;
+        }
 
-      const blob = new Blob(
-        [JSON.stringify(cached.result, null, 2)],
-        { type: 'application/json' },
-      );
+        const cached =
+          await sendToBackground({
+            type:
+              'GET_SCAN_RESULT',
+            url: tab.url,
+          });
 
-      const url = URL.createObjectURL(blob);
+        if (!cached?.result) {
+          return;
+        }
 
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `darkguard-${slugify(tab.url)}.json`;
-      anchor.click();
+        const blob =
+          new Blob(
+            [
+              JSON.stringify(
+                cached.result,
+                null,
+                2
+              ),
+            ],
+            {
+              type:
+                'application/json',
+            }
+          );
 
-      URL.revokeObjectURL(url);
-    });
+        const downloadUrl =
+          URL.createObjectURL(blob);
+
+        const a =
+          document.createElement('a');
+
+        a.href = downloadUrl;
+
+        a.download =
+          `darkguard-${slugify(tab.url)}.json`;
+
+        a.click();
+
+        URL.revokeObjectURL(
+          downloadUrl
+        );
+      }
+    );
   }
 }
 
-function pollForResult(url, tabId) {
+// ─────────────────────────────────────────────────────────────
+// POLLING
+// ─────────────────────────────────────────────────────────────
+
+function pollForResult(
+  url,
+  tabId
+) {
+
   let attempts = 0;
-  const MAX_ATTEMPTS = 30;
 
-  const interval = setInterval(async () => {
-    attempts++;
+  const interval =
+    setInterval(async () => {
 
-    const status = await sendToBackground({
-      type: 'GET_STATUS',
-      tabId,
-    });
+      attempts++;
 
-    if (!status?.scanning) {
-      clearInterval(interval);
+      const status =
+        await sendToBackground({
+          type: 'GET_STATUS',
+          tabId,
+        });
 
-      const cached = await sendToBackground({
-        type: 'GET_SCAN_RESULT',
-        url,
-      });
+      if (!status?.scanning) {
 
-      if (cached) {
-        renderCached(cached);
-      } else {
+        clearInterval(interval);
+
+        const cached =
+          await sendToBackground({
+            type:
+              'GET_SCAN_RESULT',
+            url,
+          });
+
+        if (cached) {
+          renderCached(cached);
+        } else {
+
+          showState('error');
+
+          const err =
+            document.getElementById(
+              'error-message'
+            );
+
+          if (err) {
+            err.textContent =
+              'Scan finished but no result found.';
+          }
+        }
+
+        return;
+      }
+
+      if (attempts > 40) {
+
+        clearInterval(interval);
+
         showState('error');
 
-        const err = document.getElementById('error-message');
+        const err =
+          document.getElementById(
+            'error-message'
+          );
 
         if (err) {
           err.textContent =
-            'Scan finished but no result was stored.';
+            'Scan timed out.';
         }
       }
 
-      return;
-    }
-
-    if (attempts >= MAX_ATTEMPTS) {
-      clearInterval(interval);
-
-      showState('error');
-
-      const err = document.getElementById('error-message');
-
-      if (err) {
-        err.textContent =
-          'Scan timed out after 60 seconds.';
-      }
-    }
-  }, 2000);
+    }, 1500);
 }
 
 // ─────────────────────────────────────────────────────────────
-// RENDER CACHED
+// RESULT RENDERING
 // ─────────────────────────────────────────────────────────────
 
-function renderCached(cached) {
+function renderCached(
+  cached
+) {
+
   if (cached.error) {
+
     showState('error');
 
-    const err = document.getElementById('error-message');
+    const err =
+      document.getElementById(
+        'error-message'
+      );
 
     if (err) {
-      err.textContent = cached.error;
+      err.textContent =
+        cached.error;
     }
 
     return;
   }
 
-  const result = cached.result;
+  const result =
+    cached.result;
 
-  window.latestResult = result;
+  window.latestResult =
+    result;
 
   if (!result) {
+
     showState('error');
+
     return;
   }
 
-  if ((result.total_detected || 0) === 0) {
+  if (
+    (result.total_detected || 0)
+    === 0
+  ) {
+
     showState('clean');
 
-    const clean = document.getElementById('clean-summary');
+    const clean =
+      document.getElementById(
+        'clean-summary'
+      );
 
     if (clean) {
       clean.textContent =
         result.synthesis_summary ||
-        'This page appears to follow fair UX practices.';
+        'No dark patterns detected.';
     }
 
     return;
   }
 
   showState('results');
+
   renderResults(result);
 }
 
-// ─────────────────────────────────────────────────────────────
-// RENDER RESULTS
-// ─────────────────────────────────────────────────────────────
+function renderResults(
+  result
+) {
 
-function renderResults(result) {
   const patterns =
-    result.all_detected_patterns ||
-    result.detected_patterns ||
+    result
+      .all_detected_patterns ||
     [];
 
-  const severityCount = document.getElementById('severity-count');
+  const countEl =
+    document.getElementById(
+      'severity-count'
+    );
 
-  if (severityCount) {
-    severityCount.textContent =
-      result.total_detected || patterns.length || 0;
+  if (countEl) {
+    countEl.textContent =
+      result.total_detected ||
+      patterns.length ||
+      0;
   }
 
-  const chip = document.getElementById('severity-chip');
+  const sevChip =
+    document.getElementById(
+      'severity-chip'
+    );
 
-  const sev =
-    result.overall_severity_label ||
-    result.behavioral_severity_label ||
+  const severity =
+    result
+      .overall_severity_label ||
     'none';
 
-  if (chip) {
-    chip.textContent =
-      SEVERITY_LABELS[sev] || sev.toUpperCase();
+  if (sevChip) {
 
-    chip.dataset.sev = sev;
+    sevChip.textContent =
+      SEVERITY_LABELS[
+        severity
+      ] || severity;
+
+    sevChip.dataset.sev =
+      severity;
   }
 
-  renderPatterns(patterns);
-
-  const synthCard = document.getElementById('synthesis-card');
-  const synthText = document.getElementById('synthesis-text');
-
-  if (result.synthesis_summary && synthCard && synthText) {
-    synthCard.hidden = false;
-    synthText.textContent = result.synthesis_summary;
-  }
+  renderPatterns(
+    patterns,
+    result.prevention
+  );
 
   setMetaChip(
     'meta-page-type',
-    `📄 ${result.page_type || 'UNKNOWN'}`
+    `📄 ${
+      result.page_type ||
+      'UNKNOWN'
+    }`
   );
 
   setMetaChip(
     'meta-duration',
-    `⏱ ${((result.total_duration_ms || 0) / 1000).toFixed(1)}s`
-  );
-
-  setMetaChip(
-    'meta-agents',
-    '🤖 NLP, Visual, Behavioral, Pricing'
+    `⏱ ${(
+      (
+        result.total_duration_ms ||
+        0
+      ) / 1000
+    ).toFixed(1)}s`
   );
 
   setMetaChip(
     'meta-iterations',
-    '🔁 1 iteration(s)'
+    '🔁 1 iteration'
   );
 
-  const prevention = result.prevention || {};
+  const prevention =
+    result.prevention;
 
-  if (prevention.total_patches) {
+  if (
+    prevention?.total_patches
+  ) {
+
     setMetaChip(
       'meta-prevention',
-      `🛡 ${prevention.total_patches} protections`
+      `🛡 ${
+        prevention.total_patches
+      } protections`
     );
   }
 
-  const exportBtn = document.getElementById('btn-export');
+  const synth =
+    document.getElementById(
+      'synthesis-text'
+    );
+
+  const synthCard =
+    document.getElementById(
+      'synthesis-card'
+    );
+
+  if (
+    synth &&
+    synthCard &&
+    result.synthesis_summary
+  ) {
+
+    synth.textContent =
+      result.synthesis_summary;
+
+    synthCard.hidden = false;
+  }
+
+  const exportBtn =
+    document.getElementById(
+      'btn-export'
+    );
 
   if (exportBtn) {
     exportBtn.hidden = false;
   }
 }
 
-function renderPatterns(patterns) {
-  const list = document.getElementById('pattern-list');
+// ─────────────────────────────────────────────────────────────
+// PATTERN RENDERING
+// ─────────────────────────────────────────────────────────────
 
-  if (!list) return;
+function renderPatterns(
+  patterns,
+  prevention
+) {
+
+  const list =
+    document.getElementById(
+      'pattern-list'
+    );
+
+  if (!list) {
+    return;
+  }
 
   list.innerHTML = '';
 
-  patterns = (patterns || []).filter(p => p.detected);
+  patterns =
+    (patterns || [])
+      .filter(p => p.detected);
 
   if (!patterns.length) {
+
     list.innerHTML = `
       <div class="empty-state">
         No dark patterns detected.
@@ -369,126 +556,180 @@ function renderPatterns(patterns) {
   }
 
   patterns.forEach(p => {
+
     const sev =
-      PATTERN_SEVERITY_MAP[p.pattern_code] || 'medium';
+      PATTERN_SEVERITY_MAP[
+        p.pattern_code
+      ] || 'medium';
 
     const conf =
-      Math.round(Number(p.confidence || 0) * 100);
+      Math.round(
+        Number(
+          p.confidence || 0
+        ) * 100
+      );
 
-    const item = document.createElement('div');
-    item.className = 'pattern-item';
+    const item =
+      document.createElement(
+        'div'
+      );
 
-    const header = document.createElement('div');
-    header.className = 'pattern-header';
+    item.className =
+      'pattern-item';
+
+    const header =
+      document.createElement(
+        'div'
+      );
+
+    header.className =
+      'pattern-header';
 
     header.innerHTML = `
       <span class="pattern-code-badge sev-${sev}">
-        ${escHtml(p.pattern_code || 'DP')}
+        ${escHtml(
+          p.pattern_code ||
+          'DP'
+        )}
       </span>
 
       <span class="pattern-name">
-        ${escHtml(p.pattern_name || p.pattern_code)}
+        ${escHtml(
+          p.pattern_name ||
+          p.pattern_code
+        )}
       </span>
 
       <span class="pattern-confidence">
-        ${isNaN(conf) ? 0 : conf}%
+        ${
+          isNaN(conf)
+            ? 0
+            : conf
+        }%
       </span>
 
-      <span class="pattern-expand-icon">▼</span>
+      <span class="pattern-expand-icon">
+        ▼
+      </span>
     `;
 
-    const body = document.createElement('div');
-    body.className = 'pattern-body';
-
-    const detectedBy = Array.isArray(p.detected_by)
-      ? p.detected_by.join(', ')
-      : (p.detected_by || 'Unknown');
-
-    const byEl = document.createElement('p');
-    byEl.className = 'pattern-detected-by';
-    byEl.textContent = `Detected by: ${detectedBy}`;
-
-    body.appendChild(byEl);
-
-    // ─────────────────────────────────────────
-    // Evidence Section
-    // ─────────────────────────────────────────
-
-    const evidence =
-      (p.evidence || []).filter(e => e.text);
-
-    if (evidence.length) {
-      const evList = document.createElement('div');
-      evList.className = 'evidence-list';
-
-      evidence.slice(0, 5).forEach(ev => {
-        const evEl = document.createElement('div');
-        evEl.className = 'evidence-item';
-
-        evEl.innerHTML = `
-          <p class="evidence-text">
-            "${escHtml(ev.text?.slice(0, 200) || '')}"
-          </p>
-
-          ${
-            ev.reason
-              ? `
-                <p class="evidence-reason">
-                  ↳ ${escHtml(ev.reason)}
-                </p>
-              `
-              : ''
-          }
-
-          ${
-            ev.location
-              ? `
-                <p class="evidence-location">
-                  📍 ${escHtml(ev.location)}
-                </p>
-              `
-              : ''
-          }
-        `;
-
-        evList.appendChild(evEl);
-      });
-
-      body.appendChild(evList);
-    }
-
-    // ─────────────────────────────────────────
-    // Prevention Strategies Section
-    // ─────────────────────────────────────────
-
-    const prevention =
-      window.latestResult?.prevention;
-
-    const patchInstructions =
-      prevention?.patch_instructions || [];
-
-    const relatedPatches =
-      patchInstructions.filter(
-        patch =>
-          patch.pattern_code === p.pattern_code
+    const body =
+      document.createElement(
+        'div'
       );
 
-    if (relatedPatches.length) {
-      const preventionSection =
-        document.createElement('div');
+    body.className =
+      'pattern-body';
 
-      preventionSection.className =
+    // Detected by
+    const by =
+      document.createElement(
+        'p'
+      );
+
+    by.className =
+      'pattern-detected-by';
+
+    by.textContent =
+      `Detected by: ${
+        Array.isArray(
+          p.detected_by
+        )
+          ? p.detected_by.join(
+              ', '
+            )
+          : (
+              p.detected_by ||
+              'Unknown'
+            )
+      }`;
+
+    body.appendChild(by);
+
+    // Evidence
+    const evidence =
+      (
+        p.evidence || []
+      ).filter(e => e.text);
+
+    if (evidence.length) {
+
+      const evList =
+        document.createElement(
+          'div'
+        );
+
+      evList.className =
+        'evidence-list';
+
+      evidence
+        .slice(0, 5)
+        .forEach(ev => {
+
+          const evEl =
+            document.createElement(
+              'div'
+            );
+
+          evEl.className =
+            'evidence-item';
+
+          evEl.innerHTML = `
+            <p class="evidence-text">
+              "${escHtml(
+                ev.text
+                  ?.slice(
+                    0,
+                    200
+                  ) || ''
+              )}"
+            </p>
+          `;
+
+          evList.appendChild(
+            evEl
+          );
+        });
+
+      body.appendChild(
+        evList
+      );
+    }
+
+    // Prevention
+    const related =
+      (
+        prevention
+          ?.patch_instructions ||
+        []
+      ).filter(
+        patch =>
+          patch.pattern_code ===
+          p.pattern_code
+      );
+
+    if (related.length) {
+
+      const section =
+        document.createElement(
+          'div'
+        );
+
+      section.className =
         'prevention-section';
 
-      preventionSection.innerHTML = `
+      section.innerHTML = `
         <div class="prevention-header">
-          🛡 Prevention Strategies
+          🛡 Prevention
         </div>
       `;
 
-      relatedPatches.forEach(patch => {
+      related.forEach(patch => {
+
         const patchEl =
-          document.createElement('div');
+          document.createElement(
+            'div'
+          );
 
         patchEl.className =
           'prevention-item';
@@ -496,53 +737,37 @@ function renderPatterns(patterns) {
         patchEl.innerHTML = `
           <div class="prevention-action">
             ${escHtml(
-              patch.action || 'PATCH'
+              patch.action ||
+              'PATCH'
             )}
           </div>
 
           <div class="prevention-description">
             ${escHtml(
               patch.description ||
-              'Dark Guard mitigation applied'
+              'Dark Guard mitigation applied.'
             )}
           </div>
-
-          ${
-            patch.css_selector
-              ? `
-                <div class="prevention-selector">
-                  🎯 ${escHtml(
-                    patch.css_selector
-                  )}
-                </div>
-              `
-              : ''
-          }
-
-          ${
-            patch.priority
-              ? `
-                <div class="prevention-priority">
-                  Priority: ${patch.priority}
-                </div>
-              `
-              : ''
-          }
         `;
 
-        preventionSection.appendChild(patchEl);
+        section.appendChild(
+          patchEl
+        );
       });
 
-      body.appendChild(preventionSection);
+      body.appendChild(
+        section
+      );
     }
 
-    // ─────────────────────────────────────────
-    // Expand Toggle
-    // ─────────────────────────────────────────
-
-    header.addEventListener('click', () => {
-      item.classList.toggle('expanded');
-    });
+    header.addEventListener(
+      'click',
+      () => {
+        item.classList.toggle(
+          'expanded'
+        );
+      }
+    );
 
     item.appendChild(header);
     item.appendChild(body);
@@ -552,27 +777,29 @@ function renderPatterns(patterns) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// STATE MANAGEMENT
+// STATE
 // ─────────────────────────────────────────────────────────────
 
 function showState(name) {
-  ['loading', 'clean', 'error', 'idle', 'results']
-    .forEach(s => {
-      const el = document.getElementById(`state-${s}`);
 
-      if (el) {
-        el.hidden = (s !== name);
-      }
-    });
+  [
+    'idle',
+    'loading',
+    'results',
+    'clean',
+    'error',
+  ].forEach(state => {
 
-  if (name !== 'results') {
-    const patternList =
-      document.getElementById('pattern-list');
+    const el =
+      document.getElementById(
+        `state-${state}`
+      );
 
-    if (patternList) {
-      patternList.innerHTML = '';
+    if (el) {
+      el.hidden =
+        state !== name;
     }
-  }
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -580,44 +807,86 @@ function showState(name) {
 // ─────────────────────────────────────────────────────────────
 
 function setupHistory() {
+
   const clearBtn =
-    document.getElementById('btn-clear-history');
+    document.getElementById(
+      'btn-clear-history'
+    );
 
-  if (!clearBtn) return;
+  if (!clearBtn) {
+    return;
+  }
 
-  clearBtn.addEventListener('click', async () => {
-    await chrome.storage.local.set({
-      scan_history: [],
-    });
+  clearBtn.addEventListener(
+    'click',
+    async () => {
 
-    loadHistory();
-  });
+      await chrome.storage.local.set({
+        scan_history: [],
+      });
+
+      loadHistory();
+    }
+  );
 }
 
 async function loadHistory() {
-  const { scan_history = [] } =
-    await chrome.storage.local.get('scan_history');
 
-  const list = document.getElementById('history-list');
+  const stored =
+    await chrome.storage.local.get(
+      'scan_history'
+    );
 
-  if (!list) return;
+  const history =
+    stored.scan_history || [];
+
+  const list =
+    document.getElementById(
+      'history-list'
+    );
+
+  if (!list) {
+    return;
+  }
 
   list.innerHTML = '';
 
-  if (!scan_history.length) {
-    list.innerHTML =
-      '<div class="empty-state">No scan history yet</div>';
+  if (!history.length) {
+
+    list.innerHTML = `
+      <div class="empty-state">
+        No history yet.
+      </div>
+    `;
 
     return;
   }
 
-  scan_history.forEach(entry => {
-    const item = document.createElement('div');
+  history.forEach(entry => {
 
-    item.className = 'history-item';
+    const item =
+      document.createElement(
+        'div'
+      );
 
-    item.textContent =
-      safeDomain(entry.url || 'Unknown');
+    item.className =
+      'history-item';
+
+    item.innerHTML = `
+      <div class="history-url">
+        ${escHtml(
+          safeDomain(
+            entry.url
+          )
+        )}
+      </div>
+
+      <div class="history-meta">
+        ${
+          entry.total_detected
+        } pattern(s)
+      </div>
+    `;
 
     list.appendChild(item);
   });
@@ -627,41 +896,50 @@ async function loadHistory() {
 // SETTINGS
 // ─────────────────────────────────────────────────────────────
 
-function setupSettings() {}
+function setupSettings() {
+  // Placeholder
+}
+
+// ─────────────────────────────────────────────────────────────
+// SESSION INFO
+// ─────────────────────────────────────────────────────────────
 
 async function loadSessionInfo() {
+
   const stored =
     await chrome.storage.local.get([
       'session_id',
       'session_page_count',
     ]);
 
-  const count =
-    stored.session_page_count || 0;
-
   const sid =
-    stored.session_id || '—';
+    stored.session_id ||
+    '—';
 
-  const pageCount =
-    document.getElementById('session-page-count');
+  const count =
+    stored.session_page_count ||
+    0;
 
-  const sidDisplay =
-    document.getElementById('session-id-display');
+  const sidEl =
+    document.getElementById(
+      'session-id-display'
+    );
 
-  const pagesDisplay =
-    document.getElementById('session-pages-display');
+  const countEl =
+    document.getElementById(
+      'session-pages-display'
+    );
 
-  if (pageCount) {
-    pageCount.textContent = count;
-  }
+  if (sidEl) {
 
-  if (sidDisplay) {
-    sidDisplay.textContent =
+    sidEl.textContent =
       sid.slice(0, 8) + '…';
   }
 
-  if (pagesDisplay) {
-    pagesDisplay.textContent = count;
+  if (countEl) {
+
+    countEl.textContent =
+      count;
   }
 }
 
@@ -669,50 +947,25 @@ async function loadSessionInfo() {
 // HELPERS
 // ─────────────────────────────────────────────────────────────
 
-function displayUrl(url) {
-  if (!url) return;
+function sendToBackground(
+  message
+) {
 
-  const el = document.getElementById('current-url');
-
-  if (!el) return;
-
-  try {
-    const parsed = new URL(url);
-
-    el.textContent =
-      parsed.hostname +
-      (parsed.pathname !== '/' ? parsed.pathname : '');
-
-    el.title = url;
-  } catch {
-    el.textContent = url.slice(0, 50);
-  }
-}
-
-function setMetaChip(id, text) {
-  const el = document.getElementById(id);
-
-  if (el) {
-    el.textContent = text;
-  }
-}
-
-function hideExportButton() {
-  const btn = document.getElementById('btn-export');
-
-  if (btn) {
-    btn.hidden = true;
-  }
-}
-
-function sendToBackground(message) {
   return new Promise(resolve => {
+
     chrome.runtime.sendMessage(
       message,
       response => {
-        if (chrome.runtime.lastError) {
+
+        if (
+          chrome.runtime
+            .lastError
+        ) {
+
           resolve(null);
+
         } else {
+
           resolve(response);
         }
       }
@@ -720,30 +973,101 @@ function sendToBackground(message) {
   });
 }
 
+function displayUrl(url) {
+
+  const el =
+    document.getElementById(
+      'current-url'
+    );
+
+  if (!el || !url) {
+    return;
+  }
+
+  try {
+
+    const parsed =
+      new URL(url);
+
+    el.textContent =
+      parsed.hostname +
+      (
+        parsed.pathname !== '/'
+          ? parsed.pathname
+          : ''
+      );
+
+  } catch {
+
+    el.textContent =
+      url.slice(0, 40);
+  }
+}
+
+function setMetaChip(
+  id,
+  text
+) {
+
+  const el =
+    document.getElementById(id);
+
+  if (el) {
+    el.textContent = text;
+  }
+}
+
 function escHtml(str) {
-  if (!str) return '';
+
+  if (!str) {
+    return '';
+  }
 
   return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(
+      /&/g,
+      '&amp;'
+    )
+    .replace(
+      /</g,
+      '&lt;'
+    )
+    .replace(
+      />/g,
+      '&gt;'
+    )
+    .replace(
+      /"/g,
+      '&quot;'
+    );
 }
 
 function slugify(url) {
+
   try {
+
     return new URL(url)
       .hostname
-      .replace(/\./g, '-');
+      .replace(
+        /\./g,
+        '-'
+      );
+
   } catch {
+
     return 'page';
   }
 }
 
 function safeDomain(url) {
+
   try {
-    return new URL(url).hostname;
+
+    return new URL(url)
+      .hostname;
+
   } catch {
+
     return url || '—';
   }
 }
