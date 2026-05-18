@@ -38,6 +38,22 @@ const SEVERITY_LABELS = {
   critical: 'CRITICAL',
 };
 
+const PATTERN_CLASSIFICATIONS = {
+  DP01: 'False Urgency',
+  DP02: 'Confirm Shaming',
+  DP03: 'Disguised Ads',
+  DP04: 'Trick Question',
+  DP05: 'Drip Pricing',
+  DP06: 'Bait and Switch',
+  DP07: 'Basket Sneaking',
+  DP08: 'Subscription Trap',
+  DP09: 'Nagging',
+  DP10: 'SaaS Billing Manipulation',
+  DP11: 'Malicious and Rogue UX',
+  DP12: 'Interface Interference',
+  DP13: 'Forced Action',
+};
+
 // ─────────────────────────────────────────────────────────────
 // INIT
 // ─────────────────────────────────────────────────────────────
@@ -431,7 +447,7 @@ function renderResults(
 
   const severity =
     result
-      .overall_severity_label ||
+      .behavioral_severity_label ||
     'none';
 
   if (sevChip) {
@@ -472,21 +488,6 @@ function renderResults(
     'meta-iterations',
     '🔁 1 iteration'
   );
-
-  const prevention =
-    result.prevention;
-
-  if (
-    prevention?.total_patches
-  ) {
-
-    setMetaChip(
-      'meta-prevention',
-      `🛡 ${
-        prevention.total_patches
-      } protections`
-    );
-  }
 
   const synth =
     document.getElementById(
@@ -621,7 +622,8 @@ function renderPatterns(
     body.className =
       'pattern-body';
 
-    // Detected by
+    // DETECTED BY
+
     const by =
       document.createElement(
         'p'
@@ -630,8 +632,9 @@ function renderPatterns(
     by.className =
       'pattern-detected-by';
 
-    by.textContent =
-      `Detected by: ${
+    by.innerHTML = `
+      <strong>Detected By:</strong>
+      ${
         Array.isArray(
           p.detected_by
         )
@@ -642,25 +645,58 @@ function renderPatterns(
               p.detected_by ||
               'Unknown'
             )
-      }`;
+      }
+    `;
 
     body.appendChild(by);
 
-    // Evidence
+    // CLASSIFICATION
+
+    const classification =
+      document.createElement(
+        'div'
+      );
+
+    classification.className =
+      'dg-classification';
+
+    classification.innerHTML = `
+      <strong>Classification:</strong>
+      ${
+        PATTERN_CLASSIFICATIONS[
+          p.pattern_code
+        ] || 'Dark Pattern'
+      }
+    `;
+
+    body.appendChild(
+      classification
+    );
+
+    // EXPLANATION SECTION
+
     const evidence =
       (
         p.evidence || []
-      ).filter(e => e.text);
+      ).filter(
+        e => e.text || e.reason
+      );
 
     if (evidence.length) {
 
-      const evList =
+      const explainSection =
         document.createElement(
           'div'
         );
 
-      evList.className =
-        'evidence-list';
+      explainSection.className =
+        'dg-explanation-section';
+
+      explainSection.innerHTML = `
+        <div class="dg-section-title">
+          Why This Was Detected
+        </div>
+      `;
 
       evidence
         .slice(0, 5)
@@ -672,31 +708,53 @@ function renderPatterns(
             );
 
           evEl.className =
-            'evidence-item';
+            'dg-evidence-item';
 
           evEl.innerHTML = `
-            <p class="evidence-text">
-              "${escHtml(
-                ev.text
-                  ?.slice(
-                    0,
-                    200
-                  ) || ''
-              )}"
-            </p>
+
+            ${
+              ev.text ? `
+                <div class="dg-evidence-text">
+                  "${escHtml(
+                    ev.text
+                  )}"
+                </div>
+              ` : ''
+            }
+
+            ${
+              ev.reason ? `
+                <div class="dg-evidence-reason">
+                  ${escHtml(
+                    ev.reason
+                  )}
+                </div>
+              ` : ''
+            }
+
+            ${
+              ev.location ? `
+                <div class="dg-evidence-location">
+                  📍 ${escHtml(
+                    ev.location
+                  )}
+                </div>
+              ` : ''
+            }
           `;
 
-          evList.appendChild(
+          explainSection.appendChild(
             evEl
           );
         });
 
       body.appendChild(
-        evList
+        explainSection
       );
     }
 
-    // Prevention
+    // PREVENTION
+
     const related =
       (
         prevention
