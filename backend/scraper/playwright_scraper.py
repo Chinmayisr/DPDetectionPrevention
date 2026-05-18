@@ -97,15 +97,35 @@ async def scrape(url: str, session_id: str) -> ScrapedPage:
     All complexity is encapsulated here.
     """
     start_ts = time.perf_counter()
+
+    # ── Docker host rewriting ─────────────────────────────────
+    # Inside Docker, "localhost" / "127.0.0.1" resolves to the container
+    # itself, not the host machine.  Rewrite to host.docker.internal so
+    # Playwright can reach pages running on the developer's machine.
+    import re as _re
+    playwright_url = _re.sub(
+        r"(https?://)(?:localhost|127\.0\.0\.1)((?::\d+)?(?:/.*)?$)",
+        r"\1host.docker.internal\2",
+        url,
+        flags=_re.IGNORECASE,
+    )
+    if playwright_url != url:
+        log_url = url  # keep original URL in logs / ScrapedPage fields
+    else:
+        log_url = url
+
     log = logger.bind(url=url, session_id=session_id)
-    log.info("scrape_started")
+    log.info("scrape_started", playwright_url=playwright_url if playwright_url != url else None)
 
     pool = get_browser_pool()
 
     async with pool.acquire() as ctx:
         page = await ctx.new_page()
         try:
-            result = await _execute_scrape(page, url, session_id, log)
+            result = await _execute_scrape(page, playwright_url, session_id, log)
+            # Restore the original URL so stored results reference what the
+            # user/extension actually scanned, not the Docker-internal alias.
+            result = result.model_copy(update={"url": url})
         finally:
             await page.close()
 
@@ -128,6 +148,11 @@ async def _execute_scrape(
     log: Any,
 ) -> ScrapedPage:
     """Run the full scrape pipeline on an open Page object."""
+
+    # Pre-generate scrape_id here so we can build a consistent screenshot_key
+    # before assembling the ScrapedPage (which would otherwise auto-generate its own).
+    import uuid as _uuid
+    scrape_id = str(_uuid.uuid4())
 
     # ── Network interception ──────────────────────────────────
     network_requests: list[NetworkRequest] = []
@@ -156,10 +181,13 @@ async def _execute_scrape(
 
     page.on("request", _on_request)
 
-    # Block heavy resources that slow scraping without adding value
+    # Block heavy resources that slow scraping without adding value.
+    # Pass the async function directly — a lambda returning a coroutine is NOT
+    # a coroutine function, so Playwright would never await it and routes would
+    # never be aborted/continued, leaking pending network requests.
     await page.route(
         "**/*.{png,jpg,jpeg,gif,webp,svg,ico,woff,woff2,ttf,eot}",
-        lambda route: _block_or_continue(route),
+        _block_or_continue,
     )
 
     # ── Step 1: Navigate ──────────────────────────────────────
@@ -173,7 +201,12 @@ async def _execute_scrape(
     except Exception as exc:
         log.warning("navigation_error", error=str(exc))
         # Try again with a more lenient wait condition
-        await page.goto(url, wait_until="commit", timeout=settings.playwright_timeout)
+        try:
+            await page.goto(url, wait_until="commit", timeout=settings.playwright_timeout)
+        except Exception as exc2:
+            # Both navigation attempts failed — log and continue scraping
+            # whatever is in the page context (may be a partial load or error page)
+            log.warning("navigation_retry_failed", error=str(exc2))
 
     final_url = page.url
 
@@ -229,6 +262,38 @@ async def _execute_scrape(
 
     # ── Step 10: Parallel extraction ─────────────────────────
     log.debug("parallel_extraction_starting")
+    _EXTRACTOR_NAMES = [
+        "buttons", "forms", "prices", "supplemental", "overlays",
+        "timers", "hidden", "links", "schema", "cart_items",
+        "metadata", "html", "text", "text_elements",
+    ]
+    _gather_results = await asyncio.gather(
+        page.evaluate(EXTRACT_BUTTONS_JS),
+        page.evaluate(EXTRACT_FORMS_JS),
+        page.evaluate(EXTRACT_PRICES_JS),
+        page.evaluate(EXTRACT_SUPPLEMENTAL_CHARGES_JS),
+        page.evaluate(EXTRACT_OVERLAYS_JS),
+        page.evaluate(EXTRACT_TIMERS_JS),
+        page.evaluate(EXTRACT_HIDDEN_ELEMENTS_JS),
+        page.evaluate(EXTRACT_LINKS_JS),
+        page.evaluate(EXTRACT_SCHEMA_ORG_JS),
+        page.evaluate(EXTRACT_CART_ITEMS_JS),
+        page.evaluate(EXTRACT_METADATA_JS),
+        page.content(),
+        page.evaluate("document.body.innerText"),
+        page.evaluate(EXTRACT_ALL_TEXT_JS),
+        return_exceptions=True,   # isolate failures — one bad extractor must NOT 502
+    )
+    # Log any extraction failures and substitute safe defaults
+    def _safe_result(val: Any, default: Any = None) -> Any:
+        if isinstance(val, BaseException):
+            return default
+        return val
+
+    for _name, _res in zip(_EXTRACTOR_NAMES, _gather_results):
+        if isinstance(_res, BaseException):
+            log.warning("extractor_failed", extractor=_name, error=str(_res))
+
     (
         raw_buttons,
         raw_forms,
@@ -244,23 +309,7 @@ async def _execute_scrape(
         full_html,
         full_text,
         raw_text_elements,
-    ) = await asyncio.gather(
-        page.evaluate(EXTRACT_BUTTONS_JS),
-        page.evaluate(EXTRACT_FORMS_JS),
-        page.evaluate(EXTRACT_PRICES_JS),
-        page.evaluate(EXTRACT_SUPPLEMENTAL_CHARGES_JS),
-        page.evaluate(EXTRACT_OVERLAYS_JS),
-        page.evaluate(EXTRACT_TIMERS_JS),
-        page.evaluate(EXTRACT_HIDDEN_ELEMENTS_JS),
-        page.evaluate(EXTRACT_LINKS_JS),
-        page.evaluate(EXTRACT_SCHEMA_ORG_JS),
-        page.evaluate(EXTRACT_CART_ITEMS_JS),
-        page.evaluate(EXTRACT_METADATA_JS),
-        page.content(),
-        page.evaluate("document.body.innerText"),
-        page.evaluate(EXTRACT_ALL_TEXT_JS),
-        return_exceptions=False,
-    )
+    ) = [_safe_result(r) for r in _gather_results]
 
     # ── Step 11: Parse raw extraction results ─────────────────
     buttons     = _parse_list(raw_buttons, ButtonElement)
@@ -357,11 +406,14 @@ async def _execute_scrape(
     redirect_traps = [l for l in links if l.domain_mismatch or l.is_sponsored]
     sponsored_candidates = [l for l in links if l.is_sponsored]
 
-    # ── Step 16: Screenshot Redis key (set by session store) ──
-    screenshot_key = f"scrape:{session_id}:screenshot:{_extract_scrape_id()}"
+    # ── Step 16: Screenshot Redis key ─────────────────────────
+    # Key must match what session_store.save_scrape() writes under
+    # _scrape_screenshot_key(scrape_id) = f"dg:scrape:{scrape_id}:screenshot"
+    screenshot_key = f"dg:scrape:{scrape_id}:screenshot"
 
     # ── Step 17: Assemble ScrapedPage ─────────────────────────
     return ScrapedPage(
+        scrape_id=scrape_id,   # use the pre-generated ID
         session_id=session_id,
         url=url,
         final_url=final_url,
